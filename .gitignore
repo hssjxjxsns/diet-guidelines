@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+dist/
+
+# env and secrets
+.env
+.env.*
+!.env.example
+
+# local supabase
+supabase/.temp/
+supabase/.branches/
+
+# intermediate deliverables (workspace convention)
+temp/
+
+# local IDE / workspace rules
+.trae/
+
+# logs / os
+*.log
+.DS_Store
+Thumbs.db
