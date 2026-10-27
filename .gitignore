@@ -12,18 +12,22 @@ target/
 !.env.example
 
 # local supabase
+backend/supabase/.temp/
+backend/supabase/.branches/
 supabase/.temp/
 supabase/.branches/
 
 # expo
 .expo/
-apps/mobile/.expo/
+frontend/.expo/
 web-build/
 
 # intermediate deliverables (workspace convention)
 temp/
 
 # local IDE / workspace rules
+.idea/
+.screenshots/
 .trae/
 
 # logs / os
