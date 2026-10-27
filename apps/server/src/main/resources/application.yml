@@ -1,0 +1,33 @@
+server:
+  port: ${PORT:8080}
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: diet-guide-server
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://127.0.0.1:54322/postgres}
+    username: ${DATABASE_USER:postgres}
+    password: ${DATABASE_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 10
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+app:
+  jwt-secret: ${SUPABASE_JWT_SECRET:super-secret-jwt-token-with-at-least-32-characters-long}
+  zhipu:
+    api-key: ${ZHIPU_API_KEY:}
+    base-url: ${ZHIPU_BASE_URL:https://open.bigmodel.cn/api/paas/v4}
+    chat-model: ${ZHIPU_CHAT_MODEL:glm-5.3-flash}
+    embedding-model: ${ZHIPU_EMBEDDING_MODEL:embedding-3}
+    dimensions: ${EMBEDDING_DIMENSIONS:1024}
+    timeout-ms: ${AI_TIMEOUT_MS:20000}
+    max-retries: ${AI_MAX_RETRIES:1}
+
+logging:
+  level:
+    com.dietguide: info

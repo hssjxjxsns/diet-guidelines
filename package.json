@@ -2,14 +2,16 @@
   "name": "diet-guidelines-ai",
   "version": "0.1.0",
   "private": true,
-  "description": "Dietary Guidelines AI monorepo: backend (apps/api) and mobile client (apps/mobile)",
+  "description": "Dietary guidelines AI monorepo: Spring Boot backend (apps/server) and mobile client (apps/mobile)",
   "workspaces": [
-    "apps/*"
+    "apps/mobile"
   ],
   "scripts": {
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm test --workspace @diet/api",
-    "mobile": "npm start --workspace @diet/mobile"
+    "typecheck": "npm run typecheck --workspace @diet/mobile",
+    "mobile": "npm start --workspace @diet/mobile",
+    "server": "mvn -f apps/server/pom.xml spring-boot:run",
+    "server:test": "mvn -f apps/server/pom.xml test",
+    "server:build": "mvn -f apps/server/pom.xml -DskipTests package"
   },
   "engines": {
     "node": ">=20"

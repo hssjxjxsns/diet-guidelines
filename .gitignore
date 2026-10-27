@@ -2,14 +2,18 @@
 node_modules/
 dist/
 
+# java build output
+target/
+*.class
+
 # env and secrets
 .env
 .env.*
 !.env.example
 
 # local supabase
-**/supabase/.temp/
-**/supabase/.branches/
+supabase/.temp/
+supabase/.branches/
 
 # expo
 .expo/
