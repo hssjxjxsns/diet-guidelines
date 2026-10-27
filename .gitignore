@@ -8,8 +8,13 @@ dist/
 !.env.example
 
 # local supabase
-supabase/.temp/
-supabase/.branches/
+**/supabase/.temp/
+**/supabase/.branches/
+
+# expo
+.expo/
+apps/mobile/.expo/
+web-build/
 
 # intermediate deliverables (workspace convention)
 temp/

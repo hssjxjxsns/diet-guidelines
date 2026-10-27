@@ -1,6 +1,35 @@
 # 膳食指南 AI App
 
-基于《中国居民膳食指南（2022）》的膳食规划与记录后端。核心目标是让 **AI 负责理解与解释、计算引擎负责可追溯的数值**，并支持补录、修正与多次加餐。
+基于《中国居民膳食指南（2022）》的膳食规划与记录应用。核心目标是让 **AI 负责理解与解释、计算引擎负责可追溯的数值**，并支持补录、修正与多次加餐。
+
+仓库为 npm workspaces 单仓多包结构，前端与后端分别位于 `apps/mobile`、`apps/api`。
+
+## 目录结构
+
+```text
+apps/
+  api/                    # 后端包 @diet/api
+    src/
+      ai/                 # 智谱 Gateway、Schema、Prompt
+      dish/               # AI 菜品分析器
+      nutrition/          # 营养计算、结构评估、校验规则引擎
+      domain/             # 餐次版本规则
+      context/            # 规划上下文构建（不发送原始流水账）
+      services/           # 规划、餐次、报告、画像
+      adapters/           # Supabase 仓储实现
+      shared/             # 类型、错误、哈希
+    supabase/
+      migrations/         # 数据库迁移（表、索引、RLS、视图、RAG 函数）
+      seed.sql            # 食物与配方种子数据
+      functions/          # Edge Functions
+    tests/                # 单元与集成测试
+  mobile/                 # 移动端包 @diet/mobile（Expo + React Native）
+    src/
+      api/                # 后端接口客户端与 DTO
+      lib/                # Supabase 客户端（会话持久化）
+      screens/            # 登录、今日汇总
+package.json              # workspaces 根包与聚合脚本
+```
 
 ## 核心设计
 
@@ -15,44 +44,33 @@
 
 | 层 | 选型 |
 | --- | --- |
-| 语言 | TypeScript（Node 20+ / Deno） |
+| 前端 | Expo SDK 51 + React Native + TypeScript |
+| 后端语言 | TypeScript（Node 20+ / Deno） |
 | 数据库 | Supabase PostgreSQL 15+ + pgvector |
 | 后端接口 | Supabase Edge Functions |
 | 对话模型 | 智谱 `glm-5.3-flash`（1M 上下文，多模态） |
 | 向量模型 | 智谱 `embedding-3`，固定 1024 维 |
 | 测试 | Vitest |
 
-## 目录结构
-
-```text
-src/
-  ai/            # 智谱 Gateway、Schema、Prompt
-  dish/          # AI 菜品分析器
-  nutrition/     # 营养计算、结构评估、校验规则引擎
-  domain/        # 餐次版本规则
-  context/       # 规划上下文构建（不发送原始流水账）
-  services/      # 规划、餐次、报告、画像
-  adapters/      # Supabase 仓储实现
-  shared/        # 类型、错误、哈希
-supabase/
-  migrations/    # 数据库迁移（表、索引、RLS、视图、RAG 函数）
-  seed.sql       # 食物与配方种子数据
-  functions/     # Edge Functions
-tests/           # 单元与集成测试
-```
-
 ## 本地运行
 
 ```bash
-npm install
-cp .env.example .env
-npm run typecheck
-npm test
+npm install            # 安装所有 workspace 依赖
+
+# 后端
+npm test --workspace @diet/api
+npm run typecheck --workspace @diet/api
+
+# 前端
+cp apps/mobile/.env.example apps/mobile/.env   # 填写 EXPO_PUBLIC_* 配置
+npm run mobile                                 # 等价于 expo start
 ```
 
-当前仓库不包含移动端工程，接口通过 Edge Functions 暴露。
+根包脚本：`npm test`（后端测试）、`npm run typecheck`（全部包）、`npm run mobile`（启动 Expo）。
 
 ## Supabase
+
+以下命令在 `apps/api` 目录执行：
 
 ```bash
 supabase start
@@ -83,7 +101,7 @@ supabase functions deploy foods-parse
 
 ## API
 
-所有接口以 `Authorization: Bearer <supabase_jwt>` 鉴权。
+所有接口以 `Authorization: Bearer <supabase_jwt>` 鉴权。前端把 `EXPO_PUBLIC_API_BASE_URL` 设为 `https://<project-ref>.supabase.co/functions/v1`，请求路径直接拼接函数名。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -99,14 +117,14 @@ supabase functions deploy foods-parse
 | GET/PUT | `/settings` | 用户明确设置 |
 | POST | `/foods-parse` | 文本或照片分析菜品 |
 
-提交记录示例：
+提交记录示例（`items` 使用后端 DTO 的驼峰字段）：
 
 ```json
 {
   "mode": "append",
   "idempotency_key": "b0c1f1c4-6c2a-4f0e-9f1e-2b7a9d3c8e11",
   "items": [
-    { "raw_name": "米饭", "food_id": "f_rice_001", "amount_g": 200 }
+    { "rawName": "米饭", "foodId": "f_rice_001", "amountG": 200 }
   ]
 }
 ```
@@ -119,7 +137,7 @@ supabase functions deploy foods-parse
   "base_revision": 3,
   "idempotency_key": "5d0e2a77-1a4b-42c9-9a5e-1f0f0c7b2d33",
   "items": [
-    { "raw_name": "米饭", "food_id": "f_rice_001", "amount_g": 150 }
+    { "rawName": "米饭", "foodId": "f_rice_001", "amountG": 150 }
   ]
 }
 ```
@@ -144,6 +162,7 @@ npm test
 ## 安全
 
 - 智谱 API Key 仅存在于服务端 Secret，不进入客户端、日志或仓库。
+- 客户端只持有 Supabase `anon key` 与用户 JWT；后端 RLS 与 Edge Functions 负责授权。
 - 所有业务表启用 RLS，按 `auth.uid()` 隔离。
 - `idempotency_keys`、`ai_call_logs`、`outbox_events` 仅服务角色可访问。
 - 健康与饮食数据按敏感个人信息处理，提供导出与删除能力是上线前必做项。

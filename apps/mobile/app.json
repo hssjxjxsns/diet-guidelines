@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "膳食指南 AI",
+    "slug": "diet-guidelines-ai",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": false,
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.dietguidelines.ai"
+    }
+  }
+}
