@@ -5,6 +5,8 @@ import com.dietguide.service.RecipeCandidateStore;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.util.UUID;
+
 @Repository
 public class JdbcRecipeCandidateStore implements RecipeCandidateStore {
 
@@ -20,9 +22,10 @@ public class JdbcRecipeCandidateStore implements RecipeCandidateStore {
     public void save(String userId, DishAnalysis analysis) {
         jdbc.update(
                 """
-                insert into recipe_candidates (user_id, dish_name, proposed_recipe, confidence, source, status)
-                values (?, ?, cast(? as jsonb), ?, 'ai_inferred', 'pending_review')
+                insert into recipe_candidates (id, user_id, dish_name, proposed_recipe, confidence, source, status)
+                values (?, ?, ?, ?, ?, 'ai_inferred', 'pending_review')
                 """,
+                UUID.randomUUID().toString(),
                 userId,
                 analysis.dishName(),
                 codec.write(analysis.recipeProposal()),

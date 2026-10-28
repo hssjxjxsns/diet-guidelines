@@ -11,11 +11,10 @@ target/
 .env.*
 !.env.example
 
-# local supabase
-backend/supabase/.temp/
-backend/supabase/.branches/
-supabase/.temp/
-supabase/.branches/
+# local embedded database files
+backend/data/
+*.mv.db
+*.trace.db
 
 # expo
 .expo/

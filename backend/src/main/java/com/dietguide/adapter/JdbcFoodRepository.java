@@ -7,9 +7,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
-import java.sql.Array;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -17,7 +14,7 @@ import java.util.List;
 public class JdbcFoodRepository implements FoodRepository {
 
     private static final String COLUMNS = """
-            id, name, aliases, category, nutrients_per_100g::text as nutrients_json,
+            id, name, aliases, category, nutrients_per_100g as nutrients_json,
             edible_ratio, source, source_version, status, tags, allergens
             """;
 
@@ -31,15 +28,15 @@ public class JdbcFoodRepository implements FoodRepository {
         this.foodMapper = (resultSet, rowNum) -> new Food(
                 resultSet.getString("id"),
                 resultSet.getString("name"),
-                array(resultSet, "aliases"),
+                codec.stringList(resultSet.getString("aliases")),
                 resultSet.getString("category"),
                 codec.nutrients(resultSet.getString("nutrients_json")),
                 resultSet.getDouble("edible_ratio"),
                 resultSet.getString("source"),
                 resultSet.getString("source_version"),
                 resultSet.getString("status"),
-                array(resultSet, "tags"),
-                array(resultSet, "allergens")
+                codec.stringList(resultSet.getString("tags")),
+                codec.stringList(resultSet.getString("allergens"))
         );
     }
 
@@ -57,10 +54,10 @@ public class JdbcFoodRepository implements FoodRepository {
     public Food findByName(String name) {
         List<Food> rows = jdbc.query(
                 "select " + COLUMNS + " from nutrition_foods "
-                        + "where status = 'active' and (name = ? or ? = any(aliases)) limit 1",
+                        + "where status = 'active' and (name = ? or aliases like ?) limit 1",
                 foodMapper,
                 name,
-                name
+                "%\"" + name + "\"%"
         );
         return rows.isEmpty() ? null : rows.get(0);
     }
@@ -72,7 +69,7 @@ public class JdbcFoodRepository implements FoodRepository {
         }
         List<Food> rows = jdbc.query(
                 "select " + COLUMNS + " from nutrition_foods "
-                        + "where status = 'active' and name ilike ? order by name limit ?",
+                        + "where status = 'active' and lower(name) like lower(?) order by name limit ?",
                 foodMapper,
                 "%" + query + "%",
                 limit
@@ -120,21 +117,12 @@ public class JdbcFoodRepository implements FoodRepository {
                             resultSet.getString("source"),
                             resultSet.getString("status"),
                             ingredients,
-                            array(resultSet, "tags"),
-                            array(resultSet, "allergens")
+                            codec.stringList(resultSet.getString("tags")),
+                            codec.stringList(resultSet.getString("allergens"))
                     );
                 },
                 id
         );
         return recipes.isEmpty() ? null : recipes.get(0);
-    }
-
-    private static List<String> array(ResultSet resultSet, String column) throws SQLException {
-        Array sqlArray = resultSet.getArray(column);
-        if (sqlArray == null) {
-            return List.of();
-        }
-        String[] values = (String[]) sqlArray.getArray();
-        return values == null ? List.of() : List.of(values);
     }
 }

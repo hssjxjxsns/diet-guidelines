@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Repository
 public class JdbcMealGroupStore implements MealGroupStore {
@@ -70,21 +71,21 @@ public class JdbcMealGroupStore implements MealGroupStore {
 
     @Override
     public MealGroup createGroup(MealGroup.Draft draft) {
+        String groupId = UUID.randomUUID().toString();
         try {
-            List<MealGroup> rows = jdbc.query(
+            jdbc.update(
                     """
-                    insert into meal_groups (user_id, meal_date, meal_type, instance_seq, status)
-                    values (?, ?, ?, ?, ?)
-                    returning id, user_id, meal_date, meal_type, instance_seq, status, created_at
+                    insert into meal_groups (id, user_id, meal_date, meal_type, instance_seq, status)
+                    values (?, ?, ?, ?, ?, ?)
                     """,
-                    groupMapper,
+                    groupId,
                     draft.userId(),
                     draft.mealDate(),
                     draft.mealType(),
                     draft.instanceSeq(),
                     draft.status()
             );
-            return rows.get(0);
+            return findGroup(draft.userId(), groupId);
         } catch (DuplicateKeyException error) {
             return listGroups(draft.userId(), draft.mealDate()).stream()
                     .filter(group -> group.mealType().equals(draft.mealType())
@@ -99,7 +100,7 @@ public class JdbcMealGroupStore implements MealGroupStore {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 """
                 select id, group_id, user_id, mode, revision, base_revision,
-                       totals::text as totals_json, value_type, created_at
+                       totals as totals_json, value_type, created_at
                 from meal_entries where group_id = ? order by revision
                 """,
                 groupId
@@ -129,35 +130,39 @@ public class JdbcMealGroupStore implements MealGroupStore {
     public MealEntry insertEntry(MealEntryDraft draft) {
         if ("replace".equals(draft.mode())) {
             jdbc.update(
-                    "update meal_entries set is_current = false where group_id = ? and mode = 'replace' and is_current",
+                    "update meal_entries set is_current = false where group_id = ? and mode = 'replace' and is_current = true",
                     draft.groupId()
             );
         }
 
-        Map<String, Object> row = jdbc.queryForMap(
+        String entryId = UUID.randomUUID().toString();
+        OffsetDateTime createdAt = OffsetDateTime.now();
+
+        jdbc.update(
                 """
-                insert into meal_entries (group_id, user_id, mode, revision, base_revision, totals, value_type, is_current)
-                values (?, ?, ?, ?, ?, cast(? as jsonb), ?, true)
-                returning id, created_at
+                insert into meal_entries
+                  (id, group_id, user_id, mode, revision, base_revision, totals, value_type, is_current, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, true, ?)
                 """,
+                entryId,
                 draft.groupId(),
                 draft.userId(),
                 draft.mode(),
                 draft.revision(),
                 draft.baseRevision(),
                 codec.write(draft.totals()),
-                draft.valueType()
+                draft.valueType(),
+                createdAt
         );
-
-        String entryId = (String) row.get("id");
 
         for (MealEntry.Item item : draft.items()) {
             jdbc.update(
                     """
                     insert into meal_entry_items
-                      (entry_id, food_id, recipe_id, raw_name, amount_g, value_type, nutrients, analysis)
-                    values (?, ?, ?, ?, ?, ?, cast(? as jsonb), cast(? as jsonb))
+                      (id, entry_id, food_id, recipe_id, raw_name, amount_g, value_type, nutrients, analysis)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
+                    UUID.randomUUID().toString(),
                     entryId,
                     item.foodId(),
                     item.recipeId(),
@@ -179,7 +184,7 @@ public class JdbcMealGroupStore implements MealGroupStore {
                 draft.totals(),
                 draft.valueType(),
                 draft.items(),
-                text(row.get("created_at"))
+                createdAt.toString()
         );
     }
 
@@ -187,7 +192,7 @@ public class JdbcMealGroupStore implements MealGroupStore {
     public SubmitMealResult findIdempotent(String userId, String key, String requestHash) {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 """
-                select request_hash, response::text as response_json, status
+                select request_hash, response as response_json, status
                 from idempotency_keys where user_id = ? and key = ?
                 """,
                 userId,
@@ -211,13 +216,9 @@ public class JdbcMealGroupStore implements MealGroupStore {
     public void saveIdempotent(String userId, String key, String requestHash, SubmitMealResult result) {
         jdbc.update(
                 """
-                insert into idempotency_keys (user_id, key, scope, request_hash, response, status)
-                values (?, ?, 'meal_entry', ?, cast(? as jsonb), 'completed')
-                on conflict (user_id, key) do update set
-                  scope = excluded.scope,
-                  request_hash = excluded.request_hash,
-                  response = excluded.response,
-                  status = excluded.status
+                merge into idempotency_keys (user_id, key, scope, request_hash, response, status)
+                key (user_id, key)
+                values (?, ?, 'meal_entry', ?, ?, 'completed')
                 """,
                 userId,
                 key,
@@ -232,12 +233,9 @@ public class JdbcMealGroupStore implements MealGroupStore {
         metrics.put("values", totals);
         jdbc.update(
                 """
-                insert into daily_stats (user_id, stat_date, metrics, structure, value_type, computed_at)
-                values (?, ?, cast(? as jsonb), '{}'::jsonb, ?, now())
-                on conflict (user_id, stat_date) do update set
-                  metrics = excluded.metrics,
-                  value_type = excluded.value_type,
-                  computed_at = now()
+                merge into daily_stats (user_id, stat_date, metrics, structure, value_type, computed_at)
+                key (user_id, stat_date)
+                values (?, ?, ?, '{}', ?, current_timestamp)
                 """,
                 userId,
                 mealDate,
@@ -263,7 +261,7 @@ public class JdbcMealGroupStore implements MealGroupStore {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 """
                 select food_id, recipe_id, raw_name, amount_g, value_type,
-                       nutrients::text as nutrients_json, analysis::text as analysis_json
+                       nutrients as nutrients_json, analysis as analysis_json
                 from meal_entry_items where entry_id = ? order by id
                 """,
                 entryId

@@ -7,18 +7,25 @@ spring:
   application:
     name: diet-guide-server
   datasource:
-    url: ${DATABASE_URL:jdbc:postgresql://127.0.0.1:54322/postgres}
-    username: ${DATABASE_USER:postgres}
-    password: ${DATABASE_PASSWORD:postgres}
+    # 内置文件数据库：数据落在 ./data/diet-guide.mv.db，无需安装任何数据库服务
+    url: ${DATABASE_URL:jdbc:h2:file:./data/diet-guide;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE;NON_KEYWORDS=KEY}
+    driver-class-name: org.h2.Driver
+    username: ${DATABASE_USER:sa}
+    password: ${DATABASE_PASSWORD:}
     hikari:
       maximum-pool-size: 10
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+      data-locations: classpath:seed.sql
+      encoding: UTF-8
   jackson:
     default-property-inclusion: non_null
     serialization:
       write-dates-as-timestamps: false
 
 app:
-  jwt-secret: ${SUPABASE_JWT_SECRET:super-secret-jwt-token-with-at-least-32-characters-long}
   zhipu:
     api-key: ${ZHIPU_API_KEY:}
     base-url: ${ZHIPU_BASE_URL:https://open.bigmodel.cn/api/paas/v4}

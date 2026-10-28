@@ -25,7 +25,7 @@ public class JdbcSettingsRepository implements SettingsStore {
     public UserSettings getSettings(String userId) {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 """
-                select daily_targets::text as targets_json, preferences, allergens, avoid
+                select daily_targets as targets_json, preferences, allergens, avoid
                 from user_settings where user_id = ?
                 """,
                 userId
@@ -41,9 +41,9 @@ public class JdbcSettingsRepository implements SettingsStore {
 
         return new UserSettings(
                 dailyTargets,
-                strings(row.get("preferences")),
-                strings(row.get("allergens")),
-                strings(row.get("avoid"))
+                codec.stringList((String) row.get("preferences")),
+                codec.stringList((String) row.get("allergens")),
+                codec.stringList((String) row.get("avoid"))
         );
     }
 
@@ -51,55 +51,15 @@ public class JdbcSettingsRepository implements SettingsStore {
     public void saveSettings(String userId, UserSettings settings) {
         jdbc.update(
                 """
-                insert into user_settings (user_id, daily_targets, preferences, allergens, avoid, updated_at)
-                values (?, cast(? as jsonb), ?, ?, ?, now())
-                on conflict (user_id) do update set
-                  daily_targets = excluded.daily_targets,
-                  preferences = excluded.preferences,
-                  allergens = excluded.allergens,
-                  avoid = excluded.avoid,
-                  updated_at = now()
+                merge into user_settings (user_id, daily_targets, preferences, allergens, avoid, updated_at)
+                key (user_id)
+                values (?, ?, ?, ?, ?, current_timestamp)
                 """,
                 userId,
                 codec.write(settings.dailyTargets() == null ? Map.of() : settings.dailyTargets()),
-                sqlArray(settings.preferences()),
-                sqlArray(settings.allergens()),
-                sqlArray(settings.avoid())
+                codec.write(settings.preferences() == null ? List.of() : settings.preferences()),
+                codec.write(settings.allergens() == null ? List.of() : settings.allergens()),
+                codec.write(settings.avoid() == null ? List.of() : settings.avoid())
         );
-    }
-
-    static List<String> strings(Object value) {
-        if (value instanceof java.sql.Array sqlArray) {
-            try {
-                Object array = sqlArray.getArray();
-                if (array instanceof String[] values) {
-                    return List.of(values);
-                }
-                if (array instanceof Object[] values) {
-                    return java.util.Arrays.stream(values).map(String::valueOf).toList();
-                }
-            } catch (Exception ignored) {
-                return List.of();
-            }
-        }
-        if (value instanceof String[] values) {
-            return List.of(values);
-        }
-        return List.of();
-    }
-
-    /** PostgreSQL text[] 需要显式类型转换。 */
-    static String sqlArray(List<String> values) {
-        if (values == null || values.isEmpty()) {
-            return "{}";
-        }
-        StringBuilder builder = new StringBuilder("{");
-        for (int index = 0; index < values.size(); index += 1) {
-            if (index > 0) {
-                builder.append(',');
-            }
-            builder.append('"').append(values.get(index).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
-        }
-        return builder.append('}').toString();
     }
 }

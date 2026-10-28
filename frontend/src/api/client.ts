@@ -1,5 +1,4 @@
 import { API_BASE_URL } from '../config';
-import { supabase } from '../lib/supabase';
 import type { DaySummary, SubmitMealRequest, SubmitMealResult } from './types';
 
 export class ApiError extends Error {
@@ -14,18 +13,18 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
-  if (!token) throw new ApiError(401, 'UNAUTHORIZED', '请先登录');
-
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...init?.headers
-    }
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...init?.headers
+      }
+    });
+  } catch {
+    throw new ApiError(0, 'NETWORK_ERROR', `无法连接后端 ${API_BASE_URL}，请确认服务已启动`);
+  }
 
   const payload: unknown = await response.json().catch(() => null);
 

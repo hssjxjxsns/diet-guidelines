@@ -7,7 +7,8 @@
 ```text
 backend/        Java 17 + Spring Boot 3（端口 9000，接口前缀 /api）
   src/          领域、营养、服务、JDBC 仓储、REST 控制器
-  supabase/     数据库迁移与种子数据
+  src/main/resources/schema.sql + seed.sql   内置数据库结构与种子数据
+  data/         内置数据库文件（首次启动自动生成，不进 Git）
 frontend/       Expo + React Native + TypeScript（Dev Server 端口 3001）
 docs/           产品说明书、技术架构、AI 策略
 README.md
@@ -19,10 +20,9 @@ README.md
 | --- | --- |
 | 前端 | Expo SDK 51 + React Native + TypeScript，Dev Server `3001` |
 | 后端 | Java 17 + Spring Boot 3.3（Web / Validation / JDBC）+ Maven，端口 `9000` |
-| 数据库 | PostgreSQL 15+ + pgvector（本地用 Supabase 提供 Auth 与库） |
-| 鉴权 | Supabase JWT（后端校验 HS256 签名，取 `sub`） |
+| 数据库 | **内置 H2 文件库**（`backend/data/diet-guide.mv.db`），随后端进程启动，无需安装数据库 |
+| 鉴权 | 本地单用户模式，所有请求归属内置用户 `local-user`，无需登录 |
 | 对话模型 | 智谱 `glm-5.3-flash`（多模态） |
-| 向量模型 | 智谱 `embedding-3`，固定 1024 维 |
 | 测试 | JUnit 5 + `tsc --noEmit` |
 
 ## 核心设计
@@ -36,38 +36,20 @@ README.md
 
 ## 本地运行
 
-前置：**JDK 17+**、**Maven 3.6.3+**、Node 20+、Docker Desktop（保持运行）、Supabase CLI（`npm i -g supabase`）。
+前置：**JDK 17+**、**Maven 3.6.3+**、Node 20+。不需要 Docker，不需要安装 PostgreSQL / Supabase。
 
-### 1. 启动数据库
-
-在 `backend/` 目录（`supabase start` 会读取同级的 `supabase/` 配置）：
-
-```bash
-cd backend
-supabase init        # 仅首次，生成 supabase/config.toml
-supabase start       # 启动 Postgres / Auth / Studio
-supabase db reset    # 应用 migrations 与 seed
-```
-
-| 服务 | 地址 |
-| --- | --- |
-| 本地 Postgres | `127.0.0.1:54322` |
-| Auth / API | `http://127.0.0.1:54321` |
-| Studio | `http://127.0.0.1:54323` |
-
-### 2. 启动后端（端口 9000）
+### 1. 启动后端（端口 9000）
 
 ```powershell
 cd backend
-$env:DATABASE_URL="jdbc:postgresql://127.0.0.1:54322/postgres"
-$env:DATABASE_USER="postgres"
-$env:DATABASE_PASSWORD="postgres"
-$env:SUPABASE_JWT_SECRET="super-secret-jwt-token-with-at-least-32-characters-long"
-$env:ZHIPU_API_KEY="<你的智谱 Key>"
+$env:ZHIPU_API_KEY="<你的智谱 Key>"   # 可选，不填则 AI 接口不可用，其余功能正常
 mvn spring-boot:run
 ```
 
-`SUPABASE_JWT_SECRET` 必须与 Supabase 项目的 JWT Secret 一致；`supabase start` 输出的默认值就是上面这串。
+首次启动会自动建库建表并写入种子数据，后续启动幂等执行（`merge`）。
+
+- 数据库文件：`backend/data/diet-guide.mv.db`，删掉即完全重置。
+- 如需换路径：设置 `DATABASE_URL=jdbc:h2:file:<路径>;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=KEY`。
 
 后端单测（不需要数据库）：
 
@@ -76,19 +58,23 @@ cd backend
 mvn test
 ```
 
-### 3. 启动前端（端口 3001）
+### 2. 启动前端（端口 3001）
 
 ```bash
 cd frontend
 npm install
 cp .env.example .env
 # EXPO_PUBLIC_API_BASE_URL=http://localhost:9000/api
-# EXPO_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
-# EXPO_PUBLIC_SUPABASE_ANON_KEY=<supabase start 输出的 anon key>
 npm start
 ```
 
-`npm start` 已固定 `--port 3001`。Android 模拟器访问宿主机用 `http://10.0.2.2:9000/api`；真机调试换成电脑局域网 IP。测试账号在 Studio → Authentication → Add user 创建。
+`npm start` 已固定 `--port 3001`。地址按运行环境调整：
+
+| 运行环境 | `EXPO_PUBLIC_API_BASE_URL` |
+| --- | --- |
+| Web / iOS 模拟器 | `http://localhost:9000/api` |
+| Android 模拟器 | `http://10.0.2.2:9000/api` |
+| 真机（同一 Wi-Fi） | `http://<电脑局域网 IP>:9000/api` |
 
 ## 构建
 
@@ -98,11 +84,11 @@ mvn -DskipTests package     # 产出 target/diet-guide-server-0.1.0.jar
 java -jar target/diet-guide-server-0.1.0.jar
 ```
 
-部署时通过环境变量提供 `PORT`、`DATABASE_URL`、`DATABASE_USER`、`DATABASE_PASSWORD`、`SUPABASE_JWT_SECRET`、`ZHIPU_API_KEY`。数据库可以是任意带 pgvector 的 PostgreSQL 15+。
+部署时只需提供 `PORT`（默认 9000）与 `ZHIPU_API_KEY`；数据库文件随包目录自动创建，备份 `backend/data/` 即可完成数据迁移。
 
 ## API
 
-所有接口以 `Authorization: Bearer <supabase_jwt>` 鉴权，基地址 `http://localhost:9000/api`。
+本地单用户模式，不需要鉴权头。基地址 `http://localhost:9000/api`。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -147,14 +133,13 @@ java -jar target/diet-guide-server-0.1.0.jar
 
 ## 数据口径
 
-- 统计只读 `v_effective_meal_entries`，禁止直接聚合 `meal_entries` 全表。
+- 统计只按“最新 `replace` + 其后所有 `append`”的有效集合计算，由 `MealVersion.effective()` 统一实现，禁止直接聚合 `meal_entries` 全表。
 - `daily_stats` 保存当日汇总；历史记录变更后将覆盖该日期的 `period_reports` 标记为 `stale`。
 - 报告中的数字来自统计结果，AI 只负责文字总结。
-- 向量维度固定 1024（pgvector HNSW 对 `vector` 类型上限为 2000 维）。
+- 数组类字段（`aliases` / `tags` / `allergens`）与 JSON 字段在 H2 中以 JSON 文本存储，读写统一走 `JsonCodec`。
 
 ## 安全
 
 - 智谱 API Key 仅存在于后端环境变量，不进入客户端、日志或仓库。
-- 客户端只持有 Supabase `anon key` 与用户 JWT；后端校验 JWT 后按 `sub` 隔离数据。
-- 业务表启用 RLS；服务端用数据库账号直连，不向客户端暴露业务表。
-- 健康与饮食数据按敏感个人信息处理，提供导出与删除能力是上线前必做项。
+- 本地单用户模式没有登录体系；若未来对外开放，需要重新引入账号体系与数据隔离（数据表已预留 `user_id`）。
+- 健康与饮食数据按敏感个人信息处理，数据全部保存在本机 `backend/data/` 内，不对外上传。

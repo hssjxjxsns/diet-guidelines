@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Repository
 public class JdbcPeriodReportStore implements PeriodReportStore {
@@ -24,9 +25,9 @@ public class JdbcPeriodReportStore implements PeriodReportStore {
     public PeriodReport get(String userId, String periodType, String periodStart) {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 """
-                select user_id, period_type, period_start, period_end, stats::text as stats_json,
+                select user_id, period_type, period_start, period_end, stats as stats_json,
                        ai_summary, input_hash, status, generated_at
-                from period_reports where user_id = ? and period_type = ? and period_start = ?::date
+                from period_reports where user_id = ? and period_type = ? and period_start = cast(? as date)
                 """,
                 userId,
                 periodType,
@@ -54,17 +55,12 @@ public class JdbcPeriodReportStore implements PeriodReportStore {
     public void save(PeriodReport report) {
         jdbc.update(
                 """
-                insert into period_reports
-                  (user_id, period_type, period_start, period_end, stats, ai_summary, status, input_hash, generated_at)
-                values (?, ?, ?::date, ?::date, cast(? as jsonb), ?, ?, ?, now())
-                on conflict (user_id, period_type, period_start) do update set
-                  period_end = excluded.period_end,
-                  stats = excluded.stats,
-                  ai_summary = excluded.ai_summary,
-                  status = excluded.status,
-                  input_hash = excluded.input_hash,
-                  generated_at = now()
+                merge into period_reports
+                  (id, user_id, period_type, period_start, period_end, stats, ai_summary, status, input_hash, generated_at)
+                key (user_id, period_type, period_start)
+                values (?, ?, ?, cast(? as date), cast(? as date), ?, ?, ?, ?, current_timestamp)
                 """,
+                UUID.randomUUID().toString(),
                 report.userId(),
                 report.periodType(),
                 report.periodStart(),

@@ -28,7 +28,7 @@ public class JdbcDailyStatsStore implements DailyStatsStore {
     public List<ReportService.DailyAggregate> list(String userId, LocalDate start, LocalDate end) {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 """
-                select stat_date, metrics::text as metrics_json, value_type
+                select stat_date, metrics as metrics_json, value_type
                 from daily_stats where user_id = ? and stat_date between ? and ?
                 order by stat_date
                 """,

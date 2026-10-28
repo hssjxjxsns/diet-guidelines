@@ -48,7 +48,7 @@ public class JdbcPlanningContextLoader implements PlanningContextLoader {
 
         List<Map<String, Object>> statsRows = jdbc.queryForList(
                 """
-                select metrics::text as metrics_json, structure::text as structure_json
+                select metrics as metrics_json, structure as structure_json
                 from daily_stats where user_id = ? and stat_date = ?
                 """,
                 userId,
@@ -79,7 +79,7 @@ public class JdbcPlanningContextLoader implements PlanningContextLoader {
 
         List<Map<String, Object>> trendRows = jdbc.queryForList(
                 """
-                select metric, conclusion, status, evidence::text as evidence_json
+                select metric, conclusion, status, evidence as evidence_json
                 from inferred_trends where user_id = ? and status <> 'invalidated'
                 """,
                 userId

@@ -10,6 +10,7 @@ import org.springframework.stereotype.Repository;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Repository
 public class JdbcProfileStore implements ProfileStore {
@@ -38,7 +39,7 @@ public class JdbcProfileStore implements ProfileStore {
     public List<InferredTrend> listTrends(String userId) {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 """
-                select metric, conclusion, status, evidence::text as evidence_json
+                select metric, conclusion, status, evidence as evidence_json
                 from inferred_trends where user_id = ?
                 """,
                 userId
@@ -60,19 +61,12 @@ public class JdbcProfileStore implements ProfileStore {
     public void saveTrend(String userId, InferredTrend trend) {
         jdbc.update(
                 """
-                insert into inferred_trends
-                  (user_id, metric, conclusion, status, evidence, window_start, window_end, sample_meals, last_verified)
-                values (?, ?, ?, ?, cast(? as jsonb), ?::date, ?::date, ?, now())
-                on conflict (user_id, metric) do update set
-                  conclusion = excluded.conclusion,
-                  status = excluded.status,
-                  evidence = excluded.evidence,
-                  window_start = excluded.window_start,
-                  window_end = excluded.window_end,
-                  sample_meals = excluded.sample_meals,
-                  last_verified = now(),
-                  invalidated_at = null
+                merge into inferred_trends
+                  (id, user_id, metric, conclusion, status, evidence, window_start, window_end, sample_meals, last_verified)
+                key (user_id, metric)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
                 """,
+                UUID.randomUUID().toString(),
                 userId,
                 trend.metric(),
                 trend.conclusion(),
@@ -88,7 +82,7 @@ public class JdbcProfileStore implements ProfileStore {
     public void invalidateTrend(String userId, String metric) {
         jdbc.update(
                 """
-                update inferred_trends set status = 'invalidated', invalidated_at = now()
+                update inferred_trends set status = 'invalidated', invalidated_at = current_timestamp
                 where user_id = ? and metric = ?
                 """,
                 userId,

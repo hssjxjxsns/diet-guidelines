@@ -50,7 +50,7 @@ flowchart TB
   end
 
   subgraph Edge["接入层"]
-    AUTH["Supabase Auth (JWT)"]
+    AUTH["本地单用户（local-user）"]
     FN["Spring Boot API (Java 17 / :9000)"]
   end
 
@@ -68,10 +68,7 @@ flowchart TB
   end
 
   subgraph Data["数据层"]
-    PG[("PostgreSQL 业务数据")]
-    VEC[("pgvector 指南切片")]
-    ST["Storage 图片"]
-    JOB["pg_cron / 定时函数"]
+    PG[("H2 内置文件库<br/>backend/data/diet-guide.mv.db")]
   end
 
   subgraph Zhipu["智谱 AI"]
@@ -98,7 +95,7 @@ flowchart TB
   DISH --> GW
   REP --> NE
   PROF --> NE
-  RAG --> VEC
+  RAG --> PG
   RAG --> EMB
   GW --> CHAT
   PLAN --> PG
@@ -109,17 +106,14 @@ flowchart TB
   NE --> PG
   VAL --> PG
   GW --> PG
-  UI --> ST
-  JOB --> REP
-  JOB --> PROF
 ```
 
 **分层职责**
 
-1. **客户端**：交互与展示；只持有用户 JWT，不持有任何模型密钥；离线时记录入本地队列，联网后按幂等键补交。
-2. **接入层**：Supabase Auth 负责身份；Spring Boot 服务负责全部业务接口，用 JWT 中的 `sub` 做用户隔离，并直连 PostgreSQL（不向客户端暴露 PostgREST）。
+1. **客户端**：交互与展示；不持有任何模型密钥；通过 HTTP 直连本机后端，离线时记录入本地队列，联网后按幂等键补交。
+2. **接入层**：本地单用户模式，中间件统一注入 `local-user`；Spring Boot 服务负责全部业务接口，直连内置 H2 文件库。
 3. **业务域**：Java 模块，可单测；营养引擎为纯函数 + 仓储接口，不依赖网络；AI 菜品分析器负责把自然语言/照片转为结构化食物项与配方，是计算引擎的输入前端。
-4. **数据层**：PostgreSQL 为唯一事实来源；pgvector 仅存指南切片向量；Storage 存食物照片。
+4. **数据层**：H2 文件库为唯一事实来源（`backend/data/diet-guide.mv.db`），无需安装数据库服务；启动时由 `schema.sql` 建表、`seed.sql` 幂等写入种子数据。指南检索改为关键词匹配，不再依赖 pgvector。
 5. **AI 层**：全部经 AI Gateway 调用，统一鉴权、限流、重试、日志与输出校验；AI 不直接写入统计事实表。
 
 ---
@@ -133,13 +127,13 @@ flowchart TB
 | 移动端 | React Native + Expo | 双端复用，Dev Server 端口 `3001` |
 | 后端语言 | Java 17 | 与前端解耦，营养引擎可独立演进与部署 |
 | 后端框架 | Spring Boot 3.3（Web / Validation / JDBC） | 内嵌 Tomcat，端口 `9000`，接口前缀 `/api` |
-| 身份 | Supabase Auth | 内置 JWT；后端校验 HS256 签名 |
-| 数据库 | PostgreSQL 15+（Supabase） | 事务、唯一约束、JSONB、pgvector |
-| 向量检索 | pgvector | 与业务库同源，避免双写同步 |
+| 身份 | 本地单用户 | 数据与后端同机，无需登录；中间件固定注入 `local-user` |
+| 数据库 | **H2 2.2 文件库**（PostgreSQL 兼容模式） | 嵌入后端进程，零安装；事务、唯一约束、JSON 文本存储 |
+| 向量检索 | 关键词匹配（`guideline_chunks`） | 内置库无向量扩展；指南条目量级小，关键词匹配足够 |
 | 对话模型 | 智谱 `glm-5.3-flash` | 1M 上下文、原生多模态、成本可控 |
-| 向量模型 | 智谱 `embedding-3` | 支持 256–2048 维自定义 |
-| 文件存储 | Supabase Storage | 食物照片、报告导出 |
-| 定时任务 | pg_cron | 周期报告预生成、画像刷新 |
+| 向量模型 | 智谱 `embedding-3` | 预留能力，当前版本未启用向量检索 |
+| 文件存储 | 客户端本地 / 后续接入对象存储 | 当前版本不保存照片 |
+| 定时任务 | 应用内按需生成 | periodic 报告由接口触发并落库 |
 | 可观测性 | 自建 `ai_call_logs` + 应用日志 | Token、时延、错误可追溯 |
 | 测试 | JUnit 5 + `tsc --noEmit` | 营养计算与幂等可回归 |
 
@@ -148,14 +142,14 @@ flowchart TB
 | 编号 | 决策 | 说明 |
 | --- | --- | --- |
 | ADR-01 | 后端采用独立 Spring Boot 服务（Java 17） | API 契约与数据库结构保持不变，营养引擎仍为纯函数，可单测、可独立部署；前端只依赖 HTTP 接口 |
-| ADR-02 | 向量维度固定 **1024** | Embedding-3 默认 2048，但 pgvector 的 HNSW 索引对 `vector` 类型上限为 2000 维；1024 兼顾精度与索引可用性 |
-| ADR-03 | 向量与业务数据同库（pgvector） | 指南切片数量有限（千级），无需独立向量数据库 |
+| ADR-02 | 数据库内置为 **H2 文件库** | 免安装、免运维，数据随 `backend/data/` 目录迁移；通过 `MODE=PostgreSQL` 保留大部分 SQL 习惯 |
+| ADR-03 | 本地单用户、不引入登录 | 个人使用场景下账号体系无收益；表结构保留 `user_id`，将来开放多用户时可直接复用 |
 | ADR-04 | 所有模型调用经 AI Gateway | 客户端零密钥；统一记录 Token、重试、降级与 Schema 校验 |
 | ADR-05 | 规划建议不落库为“摄入” | 规划会话独立表；仅 `meal_entries` 的有效集合计入营养统计 |
 | ADR-06 | AI 作为菜品分析前端 | AI 负责识别菜品、拆解配方、给出区间估算；最终数值由引擎计算或标注 `ai_estimated`，避免黑箱与伪精度 |
 | ADR-07 | 餐次采用“组 + 版本链” | 支持补录与多次加餐；统计只读有效集合；`replace` 携带 `base_revision` 做并发控制 |
 
-> 本文已按「PostgreSQL + Java（Spring Boot）后端 + TypeScript 前端」落地；PRD 中若仍写 MySQL 或 Edge Functions，以本文与仓库代码为准。
+> 本文已按「Java（Spring Boot）后端 + H2 内置文件库 + TypeScript 前端」落地；PRD 中若仍写 MySQL 或 Edge Functions，以本文与仓库代码为准。
 
 ---
 
@@ -508,104 +502,77 @@ erDiagram
 | 表 | 关键字段 | 说明 |
 | --- | --- | --- |
 | `profiles` | id, age, gender, height_cm, weight_kg, activity_level | 基础资料 |
-| `user_settings` | user_id, daily_targets jsonb, preferences jsonb, allergens text[], avoid text[] | 用户明确设置（权威） |
-| `nutrition_targets` | age_range, gender, activity_level, nutrients jsonb, version | 参考摄入量 |
-| `nutrition_foods` | id, name, aliases text[], category, nutrients_per_100g jsonb, edible_ratio, source, source_version, status, unit_conversion jsonb | 食物营养库 |
+| `user_settings` | user_id, daily_targets json 文本, preferences json 文本, allergens json 数组, avoid json 数组 | 用户明确设置（权威） |
+| `nutrition_targets` | age_range, gender, activity_level, nutrients json 文本, version | 参考摄入量 |
+| `nutrition_foods` | id, name, aliases json 数组, category, nutrients_per_100g json 文本, edible_ratio, source, source_version, status, unit_conversion json 文本 | 食物营养库 |
 | `recipes` | id, name, servings, yield_g, oil_g, cooking_method, source, status | 复合菜品（正式） |
 | `recipe_ingredients` | recipe_id, food_id, amount_g | 配方原料 |
-| `recipe_candidates` | id, user_id, dish_name, proposed_recipe jsonb, confidence, source, status, reviewed_by | AI 推断配方，待审核 |
-| `plan_sessions` | id, user_id, meal_date, meal_type, status, context_snapshot jsonb, validation_result jsonb, created_at | 规划会话与可解释依据 |
-| `plan_items` | id, session_id, food_id, name, amount_g, value_type, nutrition jsonb, reason, citations jsonb, rejected | 候选餐单，不计入摄入 |
+| `recipe_candidates` | id, user_id, dish_name, proposed_recipe json 文本, confidence, source, status, reviewed_by | AI 推断配方，待审核 |
+| `plan_sessions` | id, user_id, meal_date, meal_type, status, context_snapshot json 文本, validation_result json 文本, created_at | 规划会话与可解释依据 |
+| `plan_items` | id, session_id, food_id, name, amount_g, value_type, nutrition json 文本, reason, citations json 文本, rejected | 候选餐单，不计入摄入 |
 | `meal_groups` | id, user_id, meal_date, meal_type, instance_seq, status | 餐次组（加餐可多实例） |
-| `meal_entries` | id, group_id, user_id, mode, revision, base_revision, supersedes_entry_id, is_current, totals jsonb, value_type, nutrition_data_version, idempotency_key | 餐次记录版本 |
-| `meal_entry_items` | id, entry_id, food_id, raw_name, amount_g, value_type, nutrients jsonb, analysis jsonb | 餐次明细 |
-| `daily_stats` | user_id, stat_date, metrics jsonb, structure jsonb, source_hash, computed_at | 当日统计 |
-| `period_reports` | id, user_id, period_type, period_start, period_end, stats jsonb, ai_summary, status, input_hash | 周/月报 |
-| `inferred_trends` | id, user_id, metric, conclusion, status, evidence jsonb, window_start, window_end, sample_meals | 推断趋势 |
-| `validation_rules` | rule_id, severity, threshold jsonb, weight jsonb, version, enabled | 校验规则与阈值（版本化） |
-| `guideline_chunks` | id, content, metadata jsonb, embedding vector(1024), content_hash, status | 指南切片 |
+| `meal_entries` | id, group_id, user_id, mode, revision, base_revision, supersedes_entry_id, is_current, totals json 文本, value_type, nutrition_data_version, idempotency_key | 餐次记录版本 |
+| `meal_entry_items` | id, entry_id, food_id, raw_name, amount_g, value_type, nutrients json 文本, analysis json 文本 | 餐次明细 |
+| `daily_stats` | user_id, stat_date, metrics json 文本, structure json 文本, source_hash, computed_at | 当日统计 |
+| `period_reports` | id, user_id, period_type, period_start, period_end, stats json 文本, ai_summary, status, input_hash | 周/月报 |
+| `inferred_trends` | id, user_id, metric, conclusion, status, evidence json 文本, window_start, window_end, sample_meals | 推断趋势 |
+| `validation_rules` | rule_id, severity, threshold json 文本, weight json 文本, version, enabled | 校验规则与阈值（版本化） |
+| `guideline_chunks` | id, content, metadata json 文本, content_hash, status | 指南切片 |
 | `ai_call_logs` | id, trace_id, user_id, scene, model, prompt_tokens, completion_tokens, latency_ms, status | AI 调用审计 |
-| `idempotency_keys` | user_id, key, scope, request_hash, response jsonb, status | 幂等控制 |
-| `outbox_events` | id, aggregate_type, aggregate_id, event_type, payload jsonb, processed_at | 异步重算/报告失效 |
+| `idempotency_keys` | user_id, key, scope, request_hash, response json 文本, status | 幂等控制 |
+| `outbox_events` | id, aggregate_type, aggregate_id, event_type, payload json 文本, processed_at | 异步重算/报告失效 |
 
 ### 6.3 关键约束与索引
 
 ```sql
--- 依赖扩展
-create extension if not exists vector;
-create extension if not exists pg_trgm;
+-- 内置 H2 文件库：无需任何扩展，结构与种子数据见 schema.sql / seed.sql
 
 -- 餐次组：同一餐次允许多个加餐实例（instance_seq）
-alter table meal_groups
-  add constraint uq_meal_groups unique (user_id, meal_date, meal_type, instance_seq);
+-- 已在 schema.sql 中声明：
+-- constraint uq_meal_groups unique (user_id, meal_date, meal_type, instance_seq)
 
 -- 版本链：同一餐次组内 revision 单调唯一
-alter table meal_entries
-  add constraint uq_meal_entries_revision unique (group_id, revision);
-create index idx_meal_entries_group on meal_entries (group_id, revision desc);
+-- constraint uq_meal_entries_revision unique (group_id, revision)
+-- create index idx_meal_entries_group on meal_entries (group_id, revision)
 
--- 每组只有一条“当前基线”replace
-create unique index uq_meal_entries_current_replace
-  on meal_entries (group_id)
-  where mode = 'replace' and is_current;
+-- 每组只有一条“当前基线”replace：由应用层在事务内维护 is_current，
+-- H2 不支持带 where 的部分唯一索引。
 
--- 有效集合视图：最新 replace + 其后的所有 append
-create view v_effective_meal_entries as
-select e.*
-from meal_entries e
-where e.revision >= coalesce(
-  (select max(r.revision)
-     from meal_entries r
-    where r.group_id = e.group_id and r.mode = 'replace'),
-  0
-);
-
--- 注意：不对 (user_id, meal_date, meal_type) 建唯一索引，
--- 否则会阻止补录与多次加餐。
-
--- 当日统计唯一
-alter table daily_stats add constraint uq_daily_stats unique (user_id, stat_date);
-
--- 周期报告唯一 + 缓存
-alter table period_reports add constraint uq_period unique (user_id, period_type, period_start);
+-- 有效集合：最新 replace + 其后的所有 append，
+-- 由 MealVersion.effective() 在应用层计算，不再使用数据库视图。
 
 -- 幂等
-alter table idempotency_keys add primary key (user_id, key);
+-- primary key (user_id, key)，配合 request_hash 做内容比对
 
--- 向量索引（1024 维在 HNSW 上限内）
-create index idx_guideline_chunks_embedding
-  on guideline_chunks using hnsw (embedding vector_cosine_ops)
-  with (m = 16, ef_construction = 64);
-
--- 食物名称模糊匹配
-create index idx_foods_name_trgm on nutrition_foods using gin (name gin_trgm_ops);
+-- 指南检索：关键词匹配（lower(content) like ?），不使用向量索引
 ```
 
-**统计口径**：`daily_stats` 只能通过 `v_effective_meal_entries` 汇总；任何直接聚合 `meal_entries` 全表的查询都会把历史版本重复计入，属实现错误。
+**统计口径**：`daily_stats` 只能按“最新 `replace` + 其后所有 `append`”的有效集合汇总（`MealVersion.effective()`）；任何直接聚合 `meal_entries` 全表的查询都会把历史版本重复计入，属实现错误。
 
-### 6.4 RLS 策略
+### 6.4 数据隔离
 
-| 表 | 策略 |
+内置库为单机单用户，不再使用 RLS。服务端所有查询都带 `user_id = 'local-user'` 条件，数据层保留 `user_id` 列，未来开放多用户时可直接切换为按账号隔离。
+
+| 表 | 访问方式 |
 | --- | --- |
-| `profiles` / `user_settings` / `meal_groups` / `meal_entries` / `meal_entry_items` / `daily_stats` / `period_reports` / `inferred_trends` / `plan_sessions` / `plan_items` | 仅本人可读写（`auth.uid() = user_id`）；明细表通过所属组校验 |
-| `nutrition_foods` / `recipes` / `guideline_chunks` / `validation_rules` | 所有已登录用户可读，仅服务角色可写 |
-| `recipe_candidates` | 用户可读自己的候选；审核与转正仅服务角色 |
-| `ai_call_logs` / `idempotency_keys` / `outbox_events` | 仅服务角色可访问，不对客户端开放 |
+| `profiles` / `user_settings` / `meal_groups` / `meal_entries` / `meal_entry_items` / `daily_stats` / `period_reports` / `inferred_trends` / `plan_sessions` / `plan_items` | 仅本机服务访问，按 `user_id` 过滤 |
+| `nutrition_foods` / `recipes` / `guideline_chunks` / `validation_rules` | 只读种子数据，随 `seed.sql` 幂等写入 |
+| `recipe_candidates` | 由 AI 分析写入候选，审核状态在表中标记 |
+| `ai_call_logs` / `idempotency_keys` / `outbox_events` | 仅服务端访问，不对客户端开放 |
 
 ### 6.5 迁移策略
 
-* 使用 Supabase CLI 管理迁移，禁止手改线上库。
-* 现有 `database/supabase_schema.sql` 需扩展：食物库、配方及候选、餐次组/记录/明细、规划会话、校验规则、幂等表、趋势表。
-* **餐次模型迁移**：将现有 `meal_logs` 每条记录转换为 `meal_groups`（按 `user_id + meal_date + meal_type + instance_seq`）下的一条 `mode='replace'、revision=1` 的 `meal_entries`，其明细迁移至 `meal_entry_items`；迁移后删除旧唯一索引。
-* `guideline_chunks.embedding` 由 `vector(1536)` 改为 `vector(1024)`；变更前需重建指南索引。
+* 结构与种子数据位于 `backend/src/main/resources/schema.sql` 与 `seed.sql`，启动时幂等执行（`create table if not exists` + `merge into`）。
+* 字段变更采用“新增列 → 双写 → 切换 → 清理”，保证旧数据可回滚。
+* 破坏性变更前备份 `backend/data/diet-guide.mv.db`，回滚即还原文件。
+* 数组与 JSON 字段统一以文本存储，读写必须经过 `JsonCodec`，禁止在 SQL 中做 JSON 函数运算。
 * 所有营养相关表带 `nutrition_data_version`，数据源升级时可定位历史结果版本。
-* 新表与索引采用“先建后切”顺序，保留旧表一个发布周期再删除。
 
 ---
 
 ## 7. API 设计
 
-所有接口以 Edge Function 暴露，统一前缀 `/functions/v1`，使用 Supabase JWT 鉴权。
+所有接口由 Spring Boot 暴露，统一前缀 `/api`，本地单用户模式不需要鉴权头。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -617,11 +584,9 @@ create index idx_foods_name_trgm on nutrition_foods using gin (name gin_trgm_ops
 | POST | `/meal-groups` | 创建餐次组（多次加餐时新建实例） |
 | POST | `/meal-groups/{id}/entries` | 提交 `append` / `replace` 记录（幂等 + 版本校验） |
 | GET | `/meal-groups/{id}` | 查看版本链与当前有效清单 |
-| GET | `/stats/daily?date=` | 当日统计与两类营养结果 |
 | GET | `/reports/{periodType}?start=` | 周期报告（按需生成 + 缓存） |
-| PUT | `/settings` | 更新目标、偏好、忌口、过敏原 |
-| POST | `/foods/parse` | 文本或照片 → AI 菜品分析（配方、区间、置信度） |
-| POST | `/guidelines/search` | 指南检索（调试与问答复用） |
+| GET/PUT | `/settings` | 更新目标、偏好、忌口、过敏原 |
+| POST | `/foods-parse` | 文本或照片 → AI 菜品分析（配方、区间、置信度） |
 
 **请求示例：补录一杯饮料（append）**
 
@@ -675,8 +640,8 @@ create index idx_foods_name_trgm on nutrition_foods using gin (name gin_trgm_ops
 
 | HTTP | code | 场景 |
 | --- | --- | --- |
-| 401 | `UNAUTHORIZED` | 缺失或过期 JWT |
-| 403 | `FORBIDDEN` | 访问他人数据 |
+| 401 | `UNAUTHORIZED` | 预留：当前为本地单用户模式，不会返回 |
+| 403 | `FORBIDDEN` | 预留：访问非本机用户数据 |
 | 409 | `IDEMPOTENCY_CONFLICT` | 相同幂等键但请求体不同 |
 | 409 | `MEAL_REVISION_CONFLICT` | `replace` 的 `base_revision` 已过期，返回当前版本 |
 | 410 | `SESSION_EXPIRED` | 规划会话已关闭或过期 |
@@ -695,33 +660,33 @@ create index idx_foods_name_trgm on nutrition_foods using gin (name gin_trgm_ops
 sequenceDiagram
   participant U as 用户
   participant App as 客户端
-  participant FN as Edge Function
+  participant API as Spring Boot API
   participant CTX as ContextBuilder
   participant NE as 营养引擎
   participant VAL as 校验规则引擎
-  participant DB as PostgreSQL
-  participant RAG as pgvector
+  participant DB as H2 内置库
+  participant RAG as 指南关键词检索
   participant AI as GLM-5.3-Flash
 
   U->>App: 规划下一餐
-  App->>FN: POST /plan-sessions
-  FN->>DB: 读目标、今日摄入、未记录餐次、画像
-  FN->>NE: 计算定量缺口与结构差距
-  NE-->>FN: 双轨结果
-  FN->>CTX: 组装必要上下文
+  App->>API: POST /plan-sessions
+  API->>DB: 读目标、今日摄入、未记录餐次、画像
+  API->>NE: 计算定量缺口与结构差距
+  NE-->>API: 双轨结果
+  API->>CTX: 组装必要上下文
   CTX->>RAG: 检索指南 Top-4
   RAG-->>CTX: 指南片段
   CTX->>AI: 结构化上下文 + JSON Schema
-  AI-->>FN: 候选餐单
-  FN->>VAL: 校验（过敏原/忌口/有效性/营养范围/结构/替换要求）
-  VAL-->>FN: ValidationResult
+  AI-->>API: 候选餐单
+  API->>VAL: 校验（过敏原/忌口/有效性/营养范围/结构/替换要求）
+  VAL-->>API: ValidationResult
   alt 存在 hard 失败
-    FN->>AI: 携带 failed_rules 重生成（最多 2 次）
-    AI-->>FN: 新候选餐单
-    FN->>VAL: 复检
+    API->>AI: 携带 failed_rules 重生成（最多 2 次）
+    AI-->>API: 新候选餐单
+    API->>VAL: 复检
   end
-  FN->>DB: 保存会话、context_snapshot、validation_result
-  FN-->>App: 候选餐单 + 推荐理由 + 指南引用 + 校验警告
+  API->>DB: 保存会话、context_snapshot、validation_result
+  API-->>App: 候选餐单 + 推荐理由 + 指南引用 + 校验警告
 ```
 
 ### 8.2 记录提交、补录与幂等
@@ -729,29 +694,29 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   participant App as 客户端
-  participant FN as Edge Function
-  participant DB as PostgreSQL
+  participant API as Spring Boot API
+  participant DB as H2 内置库
   participant NE as 营养引擎
 
-  App->>FN: POST /meal-groups/{id}/entries (mode, base_revision, idempotency_key)
-  FN->>DB: insert idempotency_keys on conflict do nothing
+  App->>API: POST /meal-groups/{id}/entries (mode, base_revision, idempotency_key)
+  API->>DB: 按 (user_id, key) 查幂等记录并比对 request_hash
   alt 幂等键已存在且已完成
-    DB-->>FN: 已存响应
-    FN-->>App: 返回首次结果（不新增版本）
+    DB-->>API: 已存响应
+    API-->>App: 返回首次结果（不新增版本）
   else 新请求
-    FN->>DB: advisory lock(group_id)
+    API->>DB: 事务开始（serializable + 唯一约束兜底）
     alt mode = replace 且 base_revision 已过期
-      DB-->>FN: 当前 revision 与有效清单
-      FN-->>App: 409 MEAL_REVISION_CONFLICT（供客户端合并）
+      DB-->>API: 当前 revision 与有效清单
+      API-->>App: 409 MEAL_REVISION_CONFLICT（供客户端合并）
     else 版本校验通过
-      FN->>NE: 计算本次明细营养
-      NE-->>FN: 定量 + 结构结果
-      FN->>DB: 插入 meal_entries + meal_entry_items
-      FN->>DB: 按视图重算该组有效集合
-      FN->>DB: 更新 daily_stats（只汇总有效版本）
-      FN->>DB: 周期报告标记 stale，写入 outbox
-      FN->>DB: 回填幂等响应
-      FN-->>App: 单餐报告 + 当日汇总
+      API->>NE: 计算本次明细营养
+      NE-->>API: 定量 + 结构结果
+      API->>DB: 插入 meal_entries + meal_entry_items
+      API->>DB: 读取版本链，应用层计算有效集合
+      API->>DB: 更新 daily_stats（只汇总有效版本）
+      API->>DB: 周期报告标记 stale，写入 outbox
+      API->>DB: 回填幂等响应
+      API-->>App: 单餐报告 + 当日汇总
     end
   end
 ```
@@ -811,14 +776,14 @@ flowchart LR
 
 | 项 | 措施 |
 | --- | --- |
-| 模型密钥 | 仅存 Supabase Secrets / 服务端环境变量；不进入客户端包、仓库与日志 |
-| 身份与授权 | Supabase JWT + RLS；服务端二次校验 `user_id` |
-| 最小权限 | 服务角色仅用于后台任务；普通接口使用用户上下文 |
+| 模型密钥 | 仅存服务端环境变量；不进入客户端包、仓库与日志 |
+| 身份与授权 | 本地单用户模式，中间件固定注入 `local-user`；数据层保留 `user_id` 以便扩展 |
+| 最小权限 | 数据库账号使用内置 `sa` 仅限本机文件库；不对局域网开放管理端口 |
 | 输入校验 | 长度、数值范围、枚举、文件类型与大小限制 |
 | Prompt 注入 | 用户文本不进入系统指令区；工具调用不开放写操作；输出 Schema 强校验 |
-| 敏感数据 | 健康与饮食数据按敏感个人信息处理；传输 TLS，存储加密；提供导出与删除 |
+| 敏感数据 | 健康与饮食数据按敏感个人信息处理；数据仅存本机 `backend/data/`，提供导出与删除 |
 | 审计 | 记录 AI 调用与关键写操作；不含完整敏感原文 |
-| 密钥轮换 | 定期轮换；泄露时立即吊销并更新 Secret |
+| 密钥轮换 | 定期轮换；泄露时立即吊销并更新环境变量 |
 
 ---
 
@@ -836,11 +801,11 @@ flowchart LR
 
 **措施**
 
-* 索引覆盖 `(user_id, meal_date)`、统计唯一键、向量 HNSW。
+* 索引覆盖 `(user_id, meal_date)`、统计唯一键、版本链 `(group_id, revision)`。
 * 规划与问答使用流式响应，降低首屏等待。
 * AI 超时 20 s，重试 1 次；连续失败触发熔断与规则降级。
 * 客户端离线队列 + 幂等键，弱网不丢记录、不重复记录。
-* 定时任务错峰：画像刷新与报告预生成放在低峰时段。
+* 内置库为单机文件库，报告按需生成，不依赖定时任务。
 
 ---
 
@@ -850,16 +815,15 @@ flowchart LR
 
 | 环境 | 用途 | 数据 |
 | --- | --- | --- |
-| dev | 本地 Supabase + Spring Boot（:9000） + Expo（:3001） | 种子数据 |
-| staging | 联调与回归 | 脱敏数据 |
-| prod | 线上 | 真实数据 |
+| dev | Spring Boot（:9000，内置 H2）+ Expo（:3001） | 种子数据 |
+| prod（可选） | 单机部署，jar + `data/` 目录 | 真实数据 |
 
 ### 12.2 CI/CD
 
-1. PR 触发：类型检查、Lint、单元测试、数据库迁移校验。
-2. 合并主干：执行 `supabase db push` 到 staging，构建并发布 Spring Boot JAR。
-3. 冒烟测试通过后发布 prod；后端以新版本实例替换旧实例，保留上一版本以便快速回滚。
-4. 迁移脚本必须可前滚；破坏性变更采用“新增列 → 双写 → 切换 → 清理”。
+1. PR 触发：前端 `tsc --noEmit`、后端 `mvn test`、SQL 结构校验。
+2. 合并主干：`mvn package` 产出可执行 JAR，构建前端。
+3. 发布时替换 JAR 并重启，`data/` 目录保留；回滚即恢复旧 JAR 与数据文件备份。
+4. 表结构变更必须可前滚；破坏性变更采用“新增列 → 双写 → 切换 → 清理”。
 
 ### 12.3 环境变量
 
@@ -869,9 +833,9 @@ flowchart LR
 | `ZHIPU_BASE_URL` | 默认 `https://open.bigmodel.cn/api/paas/v4` |
 | `ZHIPU_CHAT_MODEL` | 默认 `glm-5.3-flash` |
 | `ZHIPU_EMBEDDING_MODEL` | 默认 `embedding-3` |
-| `EMBEDDING_DIMENSIONS` | 固定 `1024`，变更需重建索引 |
-| `DATABASE_URL` / `DATABASE_USER` / `DATABASE_PASSWORD` | 后端直连 PostgreSQL |
-| `SUPABASE_JWT_SECRET` | 校验用户 JWT（HS256），需与 Supabase 项目一致 |
+| `EMBEDDING_DIMENSIONS` | 预留能力，当前版本未启用向量检索 |
+| `DATABASE_URL` / `DATABASE_USER` / `DATABASE_PASSWORD` | 默认内置 H2 文件库，一般无需设置 |
+| `PORT` | 后端端口，默认 `9000` |
 | `AI_TIMEOUT_MS` / `AI_MAX_RETRIES` | 超时与重试配置 |
 
 > 密钥通过部署平台的环境变量或本地 `.env`（已 gitignore）注入；不要在文档、代码或客户端中硬编码。
@@ -884,7 +848,7 @@ flowchart LR
 | --- | --- |
 | 单元测试 | 营养计算：标准食物换算、可食部、单位换算、复合菜品估算、舍入、AI 估算区间 |
 | 契约测试 | AI Gateway 的 JSON Schema 校验、菜品分析输出、异常输出降级 |
-| 数据库测试 | 餐次组唯一键、版本链唯一、有效集合视图、RLS、事务回滚 |
+| 数据库测试 | 餐次组唯一键、版本链唯一、有效集合计算、事务回滚、幂等回放 |
 | 并发测试 | 重复提交同一幂等键、`append` 与 `replace` 并发、`base_revision` 冲突、多次加餐 |
 | 校验测试 | 每条规则的 hard/soft 判定、动态范围边界、失败项结构化输出 |
 | 回归测试 | 固定样本（米饭 200 g、糖醋排骨 150 g）输出快照 |
@@ -910,11 +874,11 @@ flowchart LR
 | 食物营养数据来源与授权 | 数据缺失或合规风险 | 明确采用《中国食物成分表》版本，记录 `source` 与 `source_version`；建立审核流程 |
 | 复合菜品估算误差 | 报告偏差 | 标注 `estimated`，展示区间，允许用户修正用量 |
 | AI 估算被误当精确值 | 信任与合规风险 | 强制 `ai_estimated` 标记、区间与置信度；UI 明确区分三种 `value_type` |
-| 版本链统计重复累计 | 数据错误 | 统计只读 `v_effective_meal_entries`；单元测试覆盖 append/replace 组合 |
+| 版本链统计重复累计 | 数据错误 | 统计只读有效集合（`MealVersion.effective()`）；单元测试覆盖 append/replace 组合 |
 | 校验阈值漂移 | 行为不一致 | 阈值存 `validation_rules` 并版本化；变更需回归用例 |
 | 模型结构化输出不稳定 | 解析失败 | JSON Schema + 服务端校验 + 重试 + 规则兜底 |
-| 向量维度变更 | 需全量重建索引 | 维度写入配置并锁定；变更走迁移与重建 |
-| PRD 与实现不一致（MySQL / Edge Functions） | 认知偏差 | 以 PostgreSQL + Spring Boot 实现为准，PRD 同步修正 |
+| 内置库并发写入 | 文件锁冲突 | H2 `AUTO_SERVER=TRUE` 支持多连接；写操作走事务与唯一约束兜底 |
+| PRD 与实现不一致（MySQL / Edge Functions） | 认知偏差 | 以「Spring Boot + H2 内置库」实现为准，PRD 同步修正 |
 | 时区与跨日 | 统计错位 | 统一按用户时区计算 `meal_date`，服务端存储 UTC 时间戳 |
 | 指南版本更新 | 引用过期 | 切片带版本与状态，增量重建 |
 | 密钥泄露 | 费用与数据风险 | 服务端保管、轮换、调用限额与告警 |
@@ -926,6 +890,7 @@ flowchart LR
 ```text
 backend/
   pom.xml
+  data/                    # 内置 H2 数据库文件（运行时生成，不入库）
   src/main/java/com/dietguide/
     ai/                    # 智谱调用、重试、日志、Prompt 模板
     context/               # 必要上下文组装
@@ -933,16 +898,16 @@ backend/
     nutrition/             # 营养引擎、目标、结构评估、R01–R08 校验
     domain/                # 领域模型与餐次版本链
     service/               # 规划、餐次组、报告、画像
-    adapter/               # JDBC 仓储（PostgreSQL / pgvector）
-    web/                   # REST 控制器、JWT 鉴权、统一错误响应
+    adapter/               # JDBC 仓储（H2，JSON 文本 + 关键词检索）
+    web/                   # REST 控制器、本地单用户中间件、统一错误响应
     shared/                # 营养容器、哈希、统一异常
+  src/main/resources/
+    schema.sql             # 建表（if not exists）
+    seed.sql               # 食物、配方、规则种子（merge 幂等）
   src/test/java/com/dietguide/   # JUnit 5 单测与内存仓储
-  supabase/
-    migrations/            # 迁移集
-    seed.sql               # 食物与配方种子
 frontend/                  # Expo + React Native（:3001）
   src/api/                 # 后端客户端与 DTO
-  src/screens/             # 登录、今日汇总
+  src/screens/             # 今日汇总
 docs/                      # PRD、技术架构、AI 策略文档
 ```
 
@@ -952,8 +917,9 @@ docs/                      # PRD、技术架构、AI 策略文档
 | --- | --- |
 | 旧 `apps/api`（TypeScript） | 已整体替换为 `backend/`（Spring Boot），HTTP 契约与数据模型不变 |
 | 旧 `supabase/functions` | 已移除；所有接口由 Spring Boot 控制器承接 |
-| `supabase/migrations` | 迁入 `backend/supabase/migrations`，表结构未变 |
-| `README.md` | 已更新为 Java 后端 + Expo 前端，端口 `9000` / `3001` |
+| `supabase/migrations` + `seed.sql` | 已迁入 `backend/src/main/resources/schema.sql` 与 `seed.sql`，改为 H2 语法 |
+| 旧 Supabase 登录 | 已移除，改为本地单用户直连 |
+| `README.md` | 已更新为 Java 后端 + 内置数据库 + Expo 前端，端口 `9000` / `3001` |
 
 ---
 
@@ -961,7 +927,7 @@ docs/                      # PRD、技术架构、AI 策略文档
 
 | 阶段 | 交付物 | 验收标准 |
 | --- | --- | --- |
-| M1 数据与鉴权骨架 | 迁移集、RLS、用户设置 | 用户隔离通过；设置可读写 |
+| M1 数据骨架 | `schema.sql` + `seed.sql`、本地单用户、用户设置 | 启动自动建库；设置可读写 |
 | M2 营养引擎、菜品分析与食物库 | 计算引擎、AI 菜品分析器、食物/配方数据、单测 | 黄金样本稳定；三种 `value_type` 可区分；AI 配方可复核 |
 | M3 规划会话、校验与 AI 网关 | 会话服务、ContextBuilder、校验规则引擎、智谱接入 | 规划可恢复；hard 失败可定向重生成；规则可解释 |
 | M4 记录与报告 | 餐次组/版本链、append/replace、当日统计、单餐/周期报告 | 补录不覆盖；修正不重复累计；多次加餐正确汇总 |
@@ -980,6 +946,6 @@ docs/                      # PRD、技术架构、AI 策略文档
 | 对话模型 | `glm-5.3-flash`（1M 上下文，128K 最大输出，原生多模态） |
 | 向量模型 | `embedding-3`，维度 256–2048 可自定义（默认 2048） |
 | 向量请求限制 | 单次 ≤ 64 条，单条 ≤ 3072 tokens |
-| 本文选定维度 | 1024（适配 pgvector HNSW） |
+| 本文选定维度 | 预留 1024（当前版本未启用向量检索） |
 
 > 模型编码与计费以智谱控制台和官方文档为准；上线前用实际账号做一次连通性与限流验证。

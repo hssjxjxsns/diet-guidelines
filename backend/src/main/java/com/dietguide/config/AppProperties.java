@@ -3,7 +3,7 @@ package com.dietguide.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "app")
-public record AppProperties(String jwtSecret, Zhipu zhipu) {
+public record AppProperties(Zhipu zhipu) {
 
     public record Zhipu(
             String apiKey,

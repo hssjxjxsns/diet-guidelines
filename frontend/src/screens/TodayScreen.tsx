@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -10,7 +9,6 @@ import {
 } from 'react-native';
 import { api, today } from '../api/client';
 import type { DaySummary, MealType } from '../api/types';
-import { supabase } from '../lib/supabase';
 
 const MEAL_ORDER: MealType[] = ['breakfast', 'lunch', 'dinner', 'snack'];
 
@@ -56,9 +54,6 @@ export function TodayScreen() {
           <Text style={styles.title}>今日</Text>
           <Text style={styles.subtitle}>{date}</Text>
         </View>
-        <Pressable onPress={() => void supabase.auth.signOut()}>
-          <Text style={styles.link}>退出</Text>
-        </Pressable>
       </View>
 
       <ScrollView
@@ -130,7 +125,6 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 22, fontWeight: '600', color: '#1f2933' },
   subtitle: { fontSize: 13, color: '#7b8794' },
-  link: { color: '#2f855a', fontSize: 14 },
   content: { padding: 16, gap: 12 },
   card: { backgroundColor: '#ffffff', borderRadius: 12, padding: 16 },
   cardLabel: { fontSize: 13, color: '#7b8794' },

@@ -1,11 +1,13 @@
 package com.dietguide.adapter;
 
 import com.dietguide.shared.Nutrients;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Component
@@ -44,6 +46,19 @@ public class JsonCodec {
             return mapper.readTree(json);
         } catch (Exception error) {
             throw new IllegalStateException("cannot parse json", error);
+        }
+    }
+
+    /** 数组类字段统一以 JSON 文本存储，读取时还原为字符串列表。 */
+    public List<String> stringList(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<String> values = mapper.readValue(json, new TypeReference<List<String>>() { });
+            return values == null ? List.of() : values;
+        } catch (Exception error) {
+            return List.of();
         }
     }
 
