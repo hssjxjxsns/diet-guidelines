@@ -210,6 +210,11 @@ create table if not exists guideline_chunks (
   created_at timestamp with time zone not null default current_timestamp
 );
 
+-- 内置向量：直接把 embedding 存在同一个库里，检索时在内存算余弦相似度
+alter table guideline_chunks add column if not exists embedding clob;
+alter table guideline_chunks add column if not exists embedding_model varchar(64);
+alter table guideline_chunks add column if not exists embedded_at timestamp with time zone;
+
 create table if not exists ai_call_logs (
   id varchar(64) primary key,
   trace_id varchar(64),

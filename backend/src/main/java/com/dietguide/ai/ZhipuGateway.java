@@ -52,10 +52,23 @@ public class ZhipuGateway implements AiGateway {
             payload.put("temperature", request.temperature() == null ? 0.3 : request.temperature());
             payload.put("max_tokens", request.maxOutputTokens());
             payload.put("response_format", Map.of("type", "json_object"));
+            payload.put("reasoning_effort", config.reasoningEffort() == null ? "low" : config.reasoningEffort());
 
             String body = post("/chat/completions", payload);
             JsonNode root = mapper.readTree(body);
             String content = root.path("choices").path(0).path("message").path("content").asText("");
+            String finishReason = root.path("choices").path(0).path("finish_reason").asText("");
+            int reasoningTokens = root.path("usage").path("completion_tokens_details").path("reasoning_tokens").asInt(0);
+
+            if (content.isBlank()) {
+                log.warn("ai_call scene={} model={} status=empty_content finishReason={} reasoningTokens={}",
+                        request.scene(), config.chatModel(), finishReason, reasoningTokens);
+                throw AppException.aiInvalidOutput(
+                        finishReason.equals("length")
+                                ? "AI 输出被截断，推理占满了 token 上限，请调大 max_tokens"
+                                : "AI 返回了空内容，请稍后重试或更换模型",
+                        null);
+            }
 
             log.info("ai_call scene={} model={} promptTokens={} completionTokens={} latencyMs={} status=ok",
                     request.scene(),

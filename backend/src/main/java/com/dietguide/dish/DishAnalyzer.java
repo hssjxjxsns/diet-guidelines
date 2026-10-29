@@ -39,7 +39,7 @@ public class DishAnalyzer {
                         "food_parse",
                         Prompts.DISH_ANALYSIS_SYSTEM_PROMPT,
                         Prompts.buildDishUserPrompt(input.text(), input.hints(), input.imageUrl(), candidates, mapper),
-                        600,
+                        1600,
                         0.2,
                         input.imageUrl() == null || input.imageUrl().isBlank() ? null : List.of(input.imageUrl())
                 ),

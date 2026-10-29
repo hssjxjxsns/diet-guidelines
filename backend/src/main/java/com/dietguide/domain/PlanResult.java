@@ -7,6 +7,7 @@ public record PlanResult(
         List<PlanItem> items,
         String explanation,
         List<String> citations,
+        List<GuidelineRef> guidelines,
         ValidationResult validation,
         GapResult gap,
         boolean fallback

@@ -12,7 +12,9 @@ public record AppProperties(Zhipu zhipu) {
             String embeddingModel,
             int dimensions,
             long timeoutMs,
-            int maxRetries
+            int maxRetries,
+            /** 推理强度，glm-5.x 始终思考，取值 low / high / max。 */
+            String reasoningEffort
     ) {
     }
 }

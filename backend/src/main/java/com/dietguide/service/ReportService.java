@@ -117,7 +117,7 @@ public class ReportService {
                             "period_summary",
                             Prompts.PERIOD_SUMMARY_SYSTEM_PROMPT,
                             payload,
-                            400,
+                            900,
                             0.4,
                             null
                     ),

@@ -5,6 +5,7 @@ import com.dietguide.ai.Prompts;
 import com.dietguide.context.PlanningContextBuilder;
 import com.dietguide.domain.Food;
 import com.dietguide.domain.GapResult;
+import com.dietguide.domain.GuidelineRef;
 import com.dietguide.domain.MealPlanDraft;
 import com.dietguide.domain.PlanItem;
 import com.dietguide.domain.PlanResult;
@@ -139,6 +140,13 @@ public class PlanningService {
                 generated.items(),
                 generated.explanation(),
                 generated.citations(),
+                retrieved.stream()
+                        .map(chunk -> new GuidelineRef(
+                                chunk.id(),
+                                String.valueOf(chunk.metadata().getOrDefault("title", chunk.id())),
+                                chunk.score()
+                        ))
+                        .toList(),
                 generated.validation(),
                 gap,
                 generated.fallback()
@@ -161,7 +169,7 @@ public class PlanningService {
                             replaceConstraints != null ? "meal_replace" : "meal_plan",
                             Prompts.PLAN_SYSTEM_PROMPT,
                             Prompts.buildPlanUserPrompt(contextText, failedRules, replaceConstraints, mapper),
-                            1000,
+                            2400,
                             0.3,
                             null
                     ),

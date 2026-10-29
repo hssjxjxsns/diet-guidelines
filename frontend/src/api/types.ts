@@ -56,6 +56,8 @@ export interface SubmitMealItemInput {
   rawName: string;
   amountG: number;
   valueType?: ValueType;
+  /** AI 直接估算时携带结构化结果，由后端换算区间营养。 */
+  analysis?: DishAnalysis;
 }
 
 export interface SubmitMealRequest {
@@ -72,4 +74,82 @@ export interface SubmitMealResult {
   entry: MealEntry;
   effectiveEntries: MealEntry[];
   dailyTotals: Nutrients;
+}
+
+export interface Food {
+  id: string;
+  name: string;
+  aliases?: string[];
+  category?: string;
+  nutrientsPer100g: Nutrients;
+  edibleRatio: number;
+  tags?: string[];
+  allergens?: string[];
+}
+
+export interface DishAnalysis {
+  dishName?: string;
+  matchedFoodId?: string;
+  recipeProposal?: {
+    ingredients: Array<{ name: string; foodId?: string; amountG?: number }>;
+    oilG?: number;
+    cookingMethod?: string;
+    servings?: number;
+    yieldG?: number;
+  };
+  directEstimate?: { energyKcal?: number[]; proteinG?: number[]; confidence?: number };
+  confidence?: number;
+  basis?: string[];
+  needsUserConfirm?: boolean;
+}
+
+export interface UserSettings {
+  dailyTargets: Nutrients;
+  preferences: string[];
+  allergens: string[];
+  avoid: string[];
+}
+
+export interface PeriodReport {
+  periodType: 'weekly' | 'monthly';
+  periodStart: string;
+  periodEnd: string;
+  stats: { days: number; total: Nutrients; average: Nutrients };
+  aiSummary?: string;
+  status?: string;
+}
+
+export interface PlanItem {
+  foodId?: string;
+  recipeId?: string;
+  name: string;
+  amountG: number;
+  foodGroup?: string;
+  tags?: string[];
+  allergens?: string[];
+  reason?: string;
+  citations?: string[];
+}
+
+export interface ReplaceConstraintsInput {
+  vegetarian?: boolean;
+  noSpicy?: boolean;
+  requiredFoodGroups?: string[];
+  minProteinG?: number;
+  maxEnergyKcal?: number;
+}
+
+export interface PlanResult {
+  sessionId: string;
+  items: PlanItem[];
+  explanation?: string;
+  citations?: string[];
+  guidelines?: Array<{ id: string; title: string; score?: number | null }>;
+  validation?: {
+    passed?: boolean;
+    failedRules?: Array<{ ruleId?: string; message?: string; severity?: string }>;
+    warnings?: Array<{ ruleId?: string; message?: string }>;
+  };
+  gap?: { remaining?: Nutrients; unloggedMeals?: string[] };
+  fallback?: boolean;
 }

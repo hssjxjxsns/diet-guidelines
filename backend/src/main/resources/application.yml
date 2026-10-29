@@ -32,8 +32,9 @@ app:
     chat-model: ${ZHIPU_CHAT_MODEL:glm-5.3-flash}
     embedding-model: ${ZHIPU_EMBEDDING_MODEL:embedding-3}
     dimensions: ${EMBEDDING_DIMENSIONS:1024}
-    timeout-ms: ${AI_TIMEOUT_MS:20000}
+    timeout-ms: ${AI_TIMEOUT_MS:60000}
     max-retries: ${AI_MAX_RETRIES:1}
+    reasoning-effort: ${ZHIPU_REASONING_EFFORT:low}
 
 logging:
   level:

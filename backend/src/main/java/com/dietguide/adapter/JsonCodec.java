@@ -38,6 +38,19 @@ public class JsonCodec {
         }
     }
 
+    /** 读取对象型 JSON，失败时返回空 Map，避免调用方做类型强转。 */
+    public Map<String, Object> map(String json) {
+        if (json == null || json.isBlank()) {
+            return Map.of();
+        }
+        try {
+            Map<String, Object> value = mapper.readValue(json, new TypeReference<Map<String, Object>>() { });
+            return value == null ? Map.of() : value;
+        } catch (Exception error) {
+            return Map.of();
+        }
+    }
+
     public Object readTree(String json) {
         if (json == null || json.isBlank()) {
             return Map.of();
