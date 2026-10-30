@@ -1,6 +1,10 @@
 -- Diet Guidelines AI - 内置 H2 数据库结构
 -- 首次启动自动建表；每次启动执行 if not exists，可重复执行。
 -- 数据文件默认位于 backend/data/diet-guide.mv.db。
+-- 2026-10 业务流程重构：新增草稿态（meal_groups.status ∈ draft|logged|abandoned + expires_at）、
+-- item 级草稿表 meal_draft_items（唯一承载 AI 候选确认态）、配餐修订表 plan_revisions、
+-- daily_stats.aggregator_version 聚合口径版本。旧数据文件删除后重启即完全对齐新口径。
+-- meal_type 允许值：breakfast | lunch | second_main | dinner | snack | night_snack。
 
 create table if not exists profiles (
   id varchar(64) primary key,
@@ -92,8 +96,27 @@ create table if not exists plan_sessions (
   status varchar(32) not null default 'planning',
   context_snapshot clob not null default '{}',
   validation_result clob,
+  current_revision integer not null default 0,
   created_at timestamp with time zone not null default current_timestamp,
   updated_at timestamp with time zone not null default current_timestamp
+);
+
+alter table plan_sessions add column if not exists current_revision integer not null default 0;
+alter table plan_sessions add column if not exists accepted_group_id varchar(64);
+
+-- 配餐方案版本链：生成/换菜各产生一条 revision，支持对比与回滚
+create table if not exists plan_revisions (
+  id varchar(64) primary key,
+  session_id varchar(64) not null,
+  revision integer not null,
+  base_revision integer,
+  source varchar(32) not null default 'AI',
+  items clob not null default '[]',
+  replace_constraints clob,
+  user_feedback clob,
+  validation_result clob,
+  created_at timestamp with time zone not null default current_timestamp,
+  constraint uq_plan_revisions unique (session_id, revision)
 );
 
 create table if not exists plan_items (
@@ -117,9 +140,36 @@ create table if not exists meal_groups (
   meal_date date not null,
   meal_type varchar(16) not null,
   instance_seq integer not null default 1,
-  status varchar(16) not null default 'active',
+  status varchar(16) not null default 'draft',
+  draft_revision integer not null default 0,
+  expires_at timestamp with time zone,
+  committed_at timestamp with time zone,
   created_at timestamp with time zone not null default current_timestamp,
   constraint uq_meal_groups unique (user_id, meal_date, meal_type, instance_seq)
+);
+
+alter table meal_groups add column if not exists draft_revision integer not null default 0;
+alter table meal_groups add column if not exists expires_at timestamp with time zone;
+alter table meal_groups add column if not exists committed_at timestamp with time zone;
+
+-- item 级餐次草稿：用户编辑与 AI 候选确认态的唯一载体；
+-- confirmation_status ∈ pending|confirmed|rejected；ai_source 为空表示非 AI 来源（不受确认限制）。
+create table if not exists meal_draft_items (
+  id varchar(64) primary key,
+  group_id varchar(64) not null,
+  user_id varchar(64) not null,
+  food_id varchar(64),
+  recipe_id varchar(64),
+  raw_name varchar(128) not null,
+  amount_g numeric not null,
+  value_type varchar(16) not null default 'measured',
+  analysis clob,
+  ai_source varchar(128),
+  confirmation_status varchar(16) not null default 'confirmed',
+  confirmed_by varchar(64),
+  confirmed_at timestamp with time zone,
+  created_at timestamp with time zone not null default current_timestamp,
+  updated_at timestamp with time zone not null default current_timestamp
 );
 
 create table if not exists meal_entries (
@@ -148,8 +198,17 @@ create table if not exists meal_entry_items (
   amount_g numeric not null,
   value_type varchar(16) not null,
   nutrients clob not null default '{}',
-  analysis clob
+  analysis clob,
+  ai_source varchar(128),
+  confirmation_status varchar(16) not null default 'confirmed',
+  confirmed_by varchar(64),
+  confirmed_at timestamp with time zone
 );
+
+alter table meal_entry_items add column if not exists ai_source varchar(128);
+alter table meal_entry_items add column if not exists confirmation_status varchar(16) not null default 'confirmed';
+alter table meal_entry_items add column if not exists confirmed_by varchar(64);
+alter table meal_entry_items add column if not exists confirmed_at timestamp with time zone;
 
 create table if not exists daily_stats (
   user_id varchar(64) not null,
@@ -157,10 +216,13 @@ create table if not exists daily_stats (
   metrics clob not null default '{}',
   structure clob not null default '{}',
   value_type varchar(16) not null default 'measured',
+  aggregator_version varchar(32) not null default 'v1',
   source_hash varchar(128),
   computed_at timestamp with time zone not null default current_timestamp,
   primary key (user_id, stat_date)
 );
+
+alter table daily_stats add column if not exists aggregator_version varchar(32) not null default 'v1';
 
 create table if not exists period_reports (
   id varchar(64) primary key,
@@ -251,5 +313,7 @@ create table if not exists outbox_events (
 );
 
 create index if not exists idx_plan_sessions_user_date on plan_sessions (user_id, meal_date);
+create index if not exists idx_plan_revisions_session on plan_revisions (session_id, revision);
 create index if not exists idx_meal_entries_group on meal_entries (group_id, revision);
 create index if not exists idx_meal_entry_items_entry on meal_entry_items (entry_id);
+create index if not exists idx_meal_draft_items_group on meal_draft_items (group_id);

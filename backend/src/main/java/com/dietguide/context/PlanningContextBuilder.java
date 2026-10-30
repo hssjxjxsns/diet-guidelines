@@ -22,6 +22,7 @@ public final class PlanningContextBuilder {
             LocalDate mealDate,
             String mealType,
             Map<String, Double> dailyTargets,
+            Map<String, Double> mealTarget,
             Map<String, Double> consumed,
             Map<String, Double> remaining,
             List<String> unloggedMeals,
@@ -52,6 +53,7 @@ public final class PlanningContextBuilder {
         snapshot.put("mealDate", input.mealDate().toString());
         snapshot.put("mealType", input.mealType());
         snapshot.put("dailyTargets", input.dailyTargets());
+        snapshot.put("mealTarget", input.mealTarget());
         snapshot.put("consumed", input.consumed());
         snapshot.put("remaining", input.remaining());
         snapshot.put("unloggedMeals", input.unloggedMeals());
@@ -96,9 +98,10 @@ public final class PlanningContextBuilder {
 
         List<String> lines = new ArrayList<>();
         lines.add("规划日期：" + input.mealDate() + "，当前餐次：" + input.mealType());
+        lines.add("本餐目标（本餐设计以此为准）：" + json(input.mealTarget(), mapper));
         lines.add("每日目标：" + json(input.dailyTargets(), mapper));
         lines.add("今日已摄入：" + json(input.consumed(), mapper));
-        lines.add("今日剩余：" + json(input.remaining(), mapper));
+        lines.add("今日剩余（仅作全天缺口提示，不用于本餐分配）：" + json(input.remaining(), mapper));
         lines.add("尚未记录的餐次：" + (input.unloggedMeals().isEmpty() ? "无" : String.join("、", input.unloggedMeals())));
         lines.add("膳食结构达成情况：" + json(structureRows, mapper));
         lines.add("近期趋势：" + (input.recentTrends() == null || input.recentTrends().isEmpty()

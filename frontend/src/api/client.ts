@@ -1,15 +1,16 @@
 import { API_BASE_URL } from '../config';
 import type {
+  AcceptPlanResult,
   DaySummary,
-  DishAnalysis,
   Food,
+  MealDraftItem,
   MealGroup,
   MealType,
+  ParseResponse,
   PeriodReport,
   PlanItem,
   PlanResult,
   ReplaceConstraintsInput,
-  SubmitMealRequest,
   SubmitMealResult,
   UserSettings
 } from './types';
@@ -18,11 +19,18 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
-    message: string
+    message: string,
+    readonly details?: unknown
   ) {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+interface FailurePayload {
+  code?: string;
+  message?: string;
+  details?: unknown;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -42,11 +50,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const payload: unknown = await response.json().catch(() => null);
 
   if (!response.ok) {
-    const failure = payload as { code?: string; message?: string } | null;
+    const failure = payload as FailurePayload | null;
     throw new ApiError(
       response.status,
       failure?.code ?? 'REQUEST_FAILED',
-      failure?.message ?? `请求失败 (${response.status})`
+      failure?.message ?? `请求失败 (${response.status})`,
+      failure?.details
     );
   }
 
@@ -81,19 +90,6 @@ export function newIdempotencyKey(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** 当日该餐次已有分组则复用，否则新建一个。 */
-export async function ensureGroupId(date: string, mealType: MealType): Promise<string> {
-  const day = await api.getDay(date);
-  const existing = day.groups
-    .filter((item) => item.group.mealType === mealType)
-    .sort((left, right) => left.group.instanceSeq - right.group.instanceSeq)[0];
-  if (existing) {
-    return existing.group.id;
-  }
-  const created = await api.createGroup(date, mealType);
-  return created.id;
-}
-
 /** 按当前时间推断该记录哪一餐。 */
 export function mealTypeForHour(hour: number): MealType {
   if (hour < 10) {
@@ -102,28 +98,108 @@ export function mealTypeForHour(hour: number): MealType {
   if (hour < 15) {
     return 'lunch';
   }
+  if (hour < 17) {
+    return 'second_main';
+  }
   if (hour < 21) {
     return 'dinner';
   }
-  return 'snack';
+  if (hour < 23) {
+    return 'snack';
+  }
+  return 'night_snack';
 }
+
+export const MEAL_LABELS: Record<MealType, string> = {
+  breakfast: '早餐',
+  lunch: '午餐',
+  second_main: '第二顿',
+  dinner: '晚餐',
+  snack: '加餐',
+  night_snack: '夜宵'
+};
+
+export const MEAL_ORDER: MealType[] = ['breakfast', 'lunch', 'second_main', 'dinner', 'snack', 'night_snack'];
 
 export const api = {
   getDay(date: string = today()): Promise<DaySummary> {
     return request<DaySummary>(`/meal-groups?date=${encodeURIComponent(date)}`);
   },
 
-  createGroup(date: string, mealType: MealType): Promise<MealGroup> {
-    return request<MealGroup>('/meal-groups', {
+  getGroup(groupId: string): Promise<{ group: MealGroup; draftItems: MealDraftItem[] }> {
+    return request<{ group: MealGroup; draftItems: MealDraftItem[] }>(`/meal-groups/${groupId}`);
+  },
+
+  /** 开餐：惰性建组（已有草稿复用，已记录组重开为草稿保留版本链）。 */
+  openDraft(date: string, mealType: MealType, instanceSeq?: number): Promise<MealGroup> {
+    return request<MealGroup>('/meal-groups/drafts', {
       method: 'POST',
-      body: JSON.stringify({ meal_date: date, meal_type: mealType })
+      body: JSON.stringify({
+        meal_date: date,
+        meal_type: mealType,
+        ...(instanceSeq !== undefined ? { instance_seq: instanceSeq } : {})
+      })
     });
   },
 
-  submitEntry(groupId: string, body: SubmitMealRequest): Promise<SubmitMealResult> {
-    return request<SubmitMealResult>(`/meal-groups/${groupId}/entries`, {
+  addDraftItem(
+    groupId: string,
+    body: {
+      foodId?: string;
+      recipeId?: string;
+      rawName: string;
+      amountG: number;
+      valueType?: string;
+      aiSource?: string;
+      confirmed?: boolean;
+      draft_revision?: number;
+    }
+  ): Promise<MealDraftItem> {
+    return request<MealDraftItem>(`/meal-groups/${groupId}/draft/items`, {
       method: 'POST',
       body: JSON.stringify(body)
+    });
+  },
+
+  updateDraftItem(
+    groupId: string,
+    itemId: string,
+    body: {
+      rawName?: string;
+      amountG?: number;
+      confirmationStatus?: 'confirmed' | 'rejected';
+      foodId?: string;
+      draft_revision?: number;
+    }
+  ): Promise<MealDraftItem> {
+    return request<MealDraftItem>(`/meal-groups/${groupId}/draft/items/${itemId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body)
+    });
+  },
+
+  removeDraftItem(groupId: string, itemId: string, draftRevision?: number): Promise<{ ok: boolean }> {
+    const suffix = draftRevision !== undefined ? `?draft_revision=${draftRevision}` : '';
+    return request<{ ok: boolean }>(`/meal-groups/${groupId}/draft/items/${itemId}${suffix}`, {
+      method: 'DELETE'
+    });
+  },
+
+  copyPrevious(groupId: string, draftRevision?: number): Promise<{ items: MealDraftItem[] }> {
+    return request<{ items: MealDraftItem[] }>(`/meal-groups/${groupId}/draft/copy-previous`, {
+      method: 'POST',
+      body: JSON.stringify(draftRevision !== undefined ? { draft_revision: draftRevision } : {})
+    });
+  },
+
+  /** commit：草稿 → 正式记录（规则校验硬拦 + 事务 + 幂等 + 聚合 + 报表 stale）。 */
+  commitDraft(groupId: string, draftRevision: number | undefined, idempotencyKey: string): Promise<SubmitMealResult> {
+    return request<SubmitMealResult>(`/meal-groups/${groupId}/draft/commit`, {
+      method: 'POST',
+      body: JSON.stringify({
+        ...(draftRevision !== undefined ? { draft_revision: draftRevision } : {}),
+        idempotency_key: idempotencyKey
+      })
     });
   },
 
@@ -132,8 +208,9 @@ export const api = {
     return request<Food[]>(`/foods${suffix}`);
   },
 
-  parseDish(text: string): Promise<DishAnalysis> {
-    return request<DishAnalysis>('/foods-parse', {
+  /** AI 识别：返回候选草稿项（全部待确认），不直接落入草稿。 */
+  parseDish(text: string): Promise<ParseResponse> {
+    return request<ParseResponse>('/foods-parse', {
       method: 'POST',
       body: JSON.stringify({ text })
     });
@@ -143,22 +220,25 @@ export const api = {
     return request<UserSettings>('/settings');
   },
 
+  /** 字段级 PATCH；变更过敏原需 confirmAllergenChange=true。 */
   saveSettings(
-    body: Partial<Pick<UserSettings, 'dailyTargets' | 'preferences' | 'allergens' | 'avoid'>>
-  ): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>('/settings', {
-      method: 'PUT',
+    body: Partial<
+      Pick<UserSettings, 'dailyTargets' | 'preferences' | 'allergens' | 'avoid'> & {
+        confirmAllergenChange: boolean;
+      }
+    >
+  ): Promise<UserSettings> {
+    return request<UserSettings>('/settings', {
+      method: 'PATCH',
       body: JSON.stringify(body)
     });
   },
 
   getReport(periodType: 'weekly' | 'monthly', start: string): Promise<PeriodReport> {
-    return request<PeriodReport>(
-      `/reports/${periodType}?start=${encodeURIComponent(start)}`
-    );
+    return request<PeriodReport>(`/reports/${periodType}?start=${encodeURIComponent(start)}`);
   },
 
-  /** 让 AI 按当日缺口生成这一餐的菜单。 */
+  /** 让 AI 按本餐目标（全天缺口仅提示）生成这一餐的菜单。 */
   createPlan(date: string, mealType: MealType): Promise<PlanResult> {
     return request<PlanResult>('/plan-sessions', {
       method: 'POST',
@@ -166,15 +246,28 @@ export const api = {
     });
   },
 
-  /** 在已有方案上提出调整（换菜、少油等）。 */
+  /** 在同一会话上做版本化修订（换菜），保存用户反馈与修订历史。 */
   revisePlan(
     sessionId: string,
     currentMenu: PlanItem[],
-    constraints: ReplaceConstraintsInput = {}
+    constraints: ReplaceConstraintsInput = {},
+    userFeedback?: string
   ): Promise<PlanResult> {
     return request<PlanResult>(`/plan-sessions/${sessionId}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ current_menu: currentMenu, constraints })
+      body: JSON.stringify({
+        current_menu: currentMenu,
+        constraints,
+        ...(userFeedback ? { user_feedback: userFeedback } : {})
+      })
+    });
+  },
+
+  /** 原子接受配餐：commit=false 生成可编辑草稿；commit=true 直接记录（单事务+幂等）。 */
+  acceptPlan(sessionId: string, commit: boolean, idempotencyKey: string): Promise<AcceptPlanResult> {
+    return request<AcceptPlanResult>(`/plan-sessions/${sessionId}/accept`, {
+      method: 'POST',
+      body: JSON.stringify({ commit, idempotency_key: idempotencyKey })
     });
   }
 };

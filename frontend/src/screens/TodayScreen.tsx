@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
+  MEAL_LABELS,
+  MEAL_ORDER,
   api,
-  ensureGroupId,
   mealTypeForHour,
   newIdempotencyKey,
   shiftDate,
@@ -18,23 +19,12 @@ import type {
   PeriodReport,
   PlanResult
 } from '../api/types';
-import { Button, ProgressBar } from '../ui/common';
+import { Button, ProgressBar, ViolationBanner } from '../ui/common';
 import { colors, common, spacing } from '../theme';
-
-const MEAL_ORDER: MealType[] = ['breakfast', 'lunch', 'dinner', 'snack'];
-
-const MEAL_LABELS: Record<MealType, string> = {
-  breakfast: '早餐',
-  lunch: '午餐',
-  dinner: '晚餐',
-  snack: '加餐'
-};
 
 export interface EditTarget {
   group: MealGroup;
   items: MealEntryItem[];
-  /** 当前最新版本号，replace 时必须携带。 */
-  baseRevision: number;
 }
 
 interface Props {
@@ -55,6 +45,7 @@ export function TodayScreen(props: Props) {
   const [now, setNow] = useState(() => new Date());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [violations, setViolations] = useState<string[]>([]);
 
   const [plan, setPlan] = useState<PlanResult | null>(null);
   const [planMealType, setPlanMealType] = useState<MealType>('dinner');
@@ -89,13 +80,15 @@ export function TodayScreen(props: Props) {
     void load();
   }, [load, refreshToken]);
 
-  const groups = [...(summary?.groups ?? [])].sort(
-    (left, right) =>
-      MEAL_ORDER.indexOf(left.group.mealType) - MEAL_ORDER.indexOf(right.group.mealType) ||
-      left.group.instanceSeq - right.group.instanceSeq
-  );
+  const groups = [...(summary?.groups ?? [])]
+    .filter((item) => item.group.status !== 'abandoned')
+    .sort(
+      (left, right) =>
+        MEAL_ORDER.indexOf(left.group.mealType) - MEAL_ORDER.indexOf(right.group.mealType) ||
+        left.group.instanceSeq - right.group.instanceSeq
+    );
 
-  const loggedMeals = new Set(groups.map((item) => item.group.mealType));
+  const loggedMeals = new Set(groups.filter((item) => item.group.status === 'logged').map((item) => item.group.mealType));
   const nextMeal = mealTypeForHour(now.getHours());
   const energy = summary?.dailyTotals.energyKcal ?? 0;
   const energyTarget = targets.energyKcal ?? 0;
@@ -115,6 +108,7 @@ export function TodayScreen(props: Props) {
   async function generatePlan() {
     setPlanBusy(true);
     setPlanError(null);
+    setViolations([]);
     try {
       const result = await api.createPlan(date, nextMeal);
       setPlan(result);
@@ -133,7 +127,8 @@ export function TodayScreen(props: Props) {
     setPlanBusy(true);
     setPlanError(null);
     try {
-      setPlan(await api.revisePlan(plan.sessionId, plan.items));
+      // 版本化换菜：同会话新 revision，反馈「换一批」入修订历史
+      setPlan(await api.revisePlan(plan.sessionId, plan.items, {}, '换一批'));
     } catch (requestError) {
       setPlanError(requestError instanceof Error ? requestError.message : '换菜失败');
     } finally {
@@ -141,28 +136,32 @@ export function TodayScreen(props: Props) {
     }
   }
 
+  /** 原子接受配餐：单接口完成会话校验→记录→幂等→状态迁移（不再前端拼 append）。 */
   async function acceptPlan() {
     if (!plan || plan.items.length === 0) {
       return;
     }
     setPlanBusy(true);
     setPlanError(null);
+    setViolations([]);
     try {
-      const groupId = await ensureGroupId(date, planMealType);
-      await api.submitEntry(groupId, {
-        mode: 'append',
-        idempotency_key: newIdempotencyKey(),
-        items: plan.items.map((item) => ({
-          foodId: item.foodId,
-          rawName: item.name,
-          amountG: item.amountG,
-          valueType: 'measured' as const
-        }))
-      });
+      const result = await api.acceptPlan(plan.sessionId, true, newIdempotencyKey());
       setPlan(null);
+      if (result.status !== 'LOGGED') {
+        setPlanError('方案已生成草稿，请在对应餐次中确认提交');
+      }
       onRefreshRequest();
     } catch (requestError) {
-      setPlanError(requestError instanceof Error ? requestError.message : '记入失败');
+      const apiError = requestError as { message?: string; details?: unknown };
+      const details = apiError.details;
+      const messages = Array.isArray(details)
+        ? (details as Array<{ message?: string }>).map((rule) => rule.message ?? String(rule))
+        : [];
+      if (messages.length > 0) {
+        setViolations(messages);
+      } else {
+        setPlanError(apiError.message ?? '记入失败');
+      }
     } finally {
       setPlanBusy(false);
     }
@@ -220,6 +219,14 @@ export function TodayScreen(props: Props) {
           <Macro label="脂肪" value={summary?.dailyTotals.fatG} target={targets.fatG} />
           <Macro label="碳水" value={summary?.dailyTotals.carbG} target={targets.carbG} />
         </View>
+        {summary?.structure?.foodGroups?.length ? (
+          <Text style={styles.structureHint}>
+            结构：{summary.structure.foodGroups
+              .filter((group) => 'vegetables' === group.group || 'protein' === group.group)
+              .map((group) => `${groupLabel(group.group)} ${Math.round(group.amountG)}g`)
+              .join(' · ')}
+          </Text>
+        ) : null}
       </View>
 
       <View style={styles.aiCard}>
@@ -242,15 +249,28 @@ export function TodayScreen(props: Props) {
               </View>
             ))}
             {plan.explanation ? <Text style={styles.aiSub}>{plan.explanation}</Text> : null}
+            {plan.source ? (
+              <Text style={styles.aiCitation}>
+                方案来源：{plan.source.startsWith('RULE_FALLBACK') ? '规则引擎兜底' : 'AI'} ·
+                版本 {plan.source.split(':')[1] ?? '1'}
+              </Text>
+            ) : null}
             {plan.guidelines?.length ? (
               <Text style={styles.aiCitation}>
                 依据：{plan.guidelines.map((item) => item.title).join('、')}
               </Text>
             ) : null}
-            {plan.validation?.failedRules?.length ? (
-              <Text style={common.error}>
-                校验提示：{plan.validation.failedRules.map((rule) => rule.message).join('；')}
+            {plan.gap?.remaining?.energyKcal !== undefined ? (
+              <Text style={styles.aiSub}>
+                全天缺口提示：今日还可摄入约 {Math.round(plan.gap.remaining.energyKcal)} kcal（本餐按本餐目标设计）
               </Text>
+            ) : null}
+            {plan.validation?.failedRules?.length ? (
+              <ViolationBanner
+                messages={plan.validation.failedRules
+                  .filter((rule) => rule.severity === 'hard')
+                  .map((rule) => rule.message ?? String(rule.ruleId))}
+              />
             ) : null}
             <View style={styles.planActions}>
               <Button label="换一批" variant="ghost" onPress={() => void revisePlan()} disabled={planBusy} />
@@ -268,6 +288,7 @@ export function TodayScreen(props: Props) {
             disabled={planBusy}
           />
         )}
+        <ViolationBanner messages={violations} />
         {planError ? <Text style={common.error}>{planError}</Text> : null}
       </View>
 
@@ -299,10 +320,28 @@ export function TodayScreen(props: Props) {
           <Text style={common.meta}>{week ? `${week.periodStart} ~ ${week.periodEnd}` : ''}</Text>
         </View>
         {week ? (
-          <View style={styles.weekRow}>
-            <WeekMetric label="平均能量" value={`${Math.round(week.stats.average.energyKcal ?? 0)}`} unit="kcal" />
-            <WeekMetric label="记录天数" value={`${week.stats.days}`} unit="天" />
-            <WeekMetric label="平均蛋白" value={`${Math.round(week.stats.average.proteinG ?? 0)}`} unit="g" />
+          <View style={styles.weekBlock}>
+            <View style={styles.weekRow}>
+              <WeekMetric label="平均能量" value={`${Math.round(week.stats.average.energyKcal ?? 0)}`} unit="kcal" />
+              <WeekMetric label="记录天数" value={`${week.stats.days}`} unit="天" />
+              <WeekMetric label="平均蛋白" value={`${Math.round(week.stats.average.proteinG ?? 0)}`} unit="g" />
+            </View>
+            {week.stats.foodGroups?.length ? (
+              <View style={styles.weekBadges}>
+                {week.stats.foodGroups
+                  .filter((group) => ['vegetables', 'protein', 'grains'].includes(group.group))
+                  .map((group) => (
+                    <View
+                      key={group.group}
+                      style={[styles.weekBadge, group.status !== 'adequate' && styles.weekBadgeBad]}
+                    >
+                      <Text style={styles.weekBadgeText}>
+                        {groupLabel(group.group)} {Math.round(group.adherenceRate * 100)}%
+                      </Text>
+                    </View>
+                  ))}
+              </View>
+            ) : null}
           </View>
         ) : (
           <Text style={common.meta}>{loading ? '加载中…' : '暂无数据'}</Text>
@@ -323,25 +362,36 @@ export function TodayScreen(props: Props) {
           );
         }
         return mealGroups.map((item) => {
-          const items = item.effective.flatMap((entry) => entry.items);
+          const isDraft = item.group.status === 'draft';
+          const items = [
+            ...item.effective.flatMap((entry) => entry.items),
+            ...item.draftItems.map((draft) => ({
+              foodId: draft.foodId ?? undefined,
+              rawName: draft.rawName,
+              amountG: draft.amountG,
+              valueType: draft.valueType as MealEntryItem['valueType'],
+              nutrients: {}
+            }))
+          ];
           const mealEnergy = item.effective.reduce((sum, entry) => sum + (entry.totals.energyKcal ?? 0), 0);
+          const hasPending = item.draftItems.some((draft) => draft.confirmationStatus !== 'confirmed');
           return (
             <View key={item.group.id} style={styles.sectionCard}>
               <View style={styles.mealHeader}>
                 <Text style={styles.sectionTitle}>
                   {MEAL_LABELS[mealType]}
-                  {mealType === 'snack' ? ` #${item.group.instanceSeq}` : ''}
+                  {isMultiInstance(mealType) ? ` #${item.group.instanceSeq}` : ''}
+                  {isDraft ? '（草稿）' : ''}
                 </Text>
                 <View style={styles.mealActions}>
-                  <Button label="添加" variant="soft" onPress={() => onAdd(mealType)} />
+                  {isDraft && hasPending ? <Text style={styles.pendingTag}>有待确认项</Text> : null}
                   <Button
-                    label="修正"
-                    variant="ghost"
+                    label={isDraft ? '继续编辑' : '修正'}
+                    variant={isDraft ? 'primary' : 'ghost'}
                     onPress={() =>
                       onEdit({
                         group: item.group,
-                        items,
-                        baseRevision: item.effective[item.effective.length - 1]?.revision ?? 0
+                        items: item.effective.flatMap((entry) => entry.items)
                       })
                     }
                   />
@@ -353,13 +403,32 @@ export function TodayScreen(props: Props) {
                   <Text style={common.meta}>{Math.round(food.amountG)} g</Text>
                 </View>
               ))}
-              <Text style={styles.mealTotal}>合计 {Math.round(mealEnergy)} kcal</Text>
+              {mealEnergy > 0 ? (
+                <Text style={styles.mealTotal}>合计 {Math.round(mealEnergy)} kcal</Text>
+              ) : null}
             </View>
           );
         });
       })}
     </ScrollView>
   );
+}
+
+function isMultiInstance(mealType: MealType): boolean {
+  return mealType === 'snack' || mealType === 'night_snack';
+}
+
+const GROUP_LABELS: Record<string, string> = {
+  vegetables: '蔬菜',
+  protein: '蛋白',
+  grains: '主食',
+  fruits: '水果',
+  dairy: '奶类',
+  oils: '油盐'
+};
+
+function groupLabel(group: string): string {
+  return GROUP_LABELS[group] ?? group;
 }
 
 function Macro(props: { label: string; value?: number; target?: number }) {
@@ -371,7 +440,7 @@ function Macro(props: { label: string; value?: number; target?: number }) {
       <Text style={styles.macroValue}>{Math.round(value)} g</Text>
       <ProgressBar ratio={ratio} />
       <Text style={styles.macroTarget}>
-        {props.target ? `${Math.round(value / props.target * 100)}%` : '-'}
+        {props.target ? `${Math.round((value / props.target) * 100)}%` : '-'}
       </Text>
     </View>
   );
@@ -453,6 +522,7 @@ const styles = StyleSheet.create({
   energyUnit: { color: 'rgba(255,255,255,0.75)', fontSize: 12 },
   energyRight: { alignItems: 'flex-end' },
   energyHint: { color: 'rgba(255,255,255,0.85)', fontSize: 12 },
+  structureHint: { color: 'rgba(255,255,255,0.9)', fontSize: 12 },
   macroRow: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.xs },
   macro: { flex: 1, gap: 4 },
   macroLabel: { fontSize: 12, color: colors.muted },
@@ -500,11 +570,22 @@ const styles = StyleSheet.create({
   timelineEnergy: { fontSize: 13, color: colors.primary, fontWeight: '600' },
   timelineNames: { fontSize: 14, color: colors.text },
   weekHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  weekRow: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.xs },
+  weekBlock: { gap: spacing.sm },
+  weekRow: { flexDirection: 'row', gap: spacing.md },
+  weekBadges: { flexDirection: 'row', gap: spacing.sm, flexWrap: 'wrap' },
+  weekBadge: {
+    backgroundColor: colors.primarySoft,
+    borderRadius: 8,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3
+  },
+  weekBadgeBad: { backgroundColor: '#fdeeec' },
+  weekBadgeText: { fontSize: 12, color: colors.text },
   weekMetric: { flex: 1, gap: 2 },
   weekUnit: { fontSize: 12, color: colors.muted, fontWeight: '400' },
   mealHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  mealActions: { flexDirection: 'row', gap: spacing.sm },
+  mealActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  pendingTag: { fontSize: 11, color: colors.warning },
   foodRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

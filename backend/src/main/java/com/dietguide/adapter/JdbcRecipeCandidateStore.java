@@ -19,17 +19,19 @@ public class JdbcRecipeCandidateStore implements RecipeCandidateStore {
     }
 
     @Override
-    public void save(String userId, DishAnalysis analysis) {
+    public String save(String userId, DishAnalysis analysis) {
+        String id = UUID.randomUUID().toString();
         jdbc.update(
                 """
                 insert into recipe_candidates (id, user_id, dish_name, proposed_recipe, confidence, source, status)
                 values (?, ?, ?, ?, ?, 'ai_inferred', 'pending_review')
                 """,
-                UUID.randomUUID().toString(),
+                id,
                 userId,
                 analysis.dishName(),
                 codec.write(analysis.recipeProposal()),
                 analysis.confidence()
         );
+        return id;
     }
 }

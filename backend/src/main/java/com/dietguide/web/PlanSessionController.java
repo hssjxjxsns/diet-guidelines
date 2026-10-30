@@ -3,6 +3,7 @@ package com.dietguide.web;
 import com.dietguide.domain.PlanItem;
 import com.dietguide.domain.PlanResult;
 import com.dietguide.domain.ReplaceConstraints;
+import com.dietguide.service.PlanAcceptService;
 import com.dietguide.service.PlanSessionStore;
 import com.dietguide.service.PlanningService;
 import com.dietguide.shared.AppException;
@@ -34,16 +35,25 @@ public class PlanSessionController {
 
     public record ReviseRequest(
             @JsonProperty("current_menu") @JsonAlias("currentMenu") List<PlanItem> currentMenu,
-            ReplaceConstraints constraints
+            ReplaceConstraints constraints,
+            @JsonProperty("user_feedback") @JsonAlias("userFeedback") String userFeedback
+    ) {
+    }
+
+    public record AcceptRequest(
+            @JsonProperty("commit") Boolean commit,
+            @JsonProperty("idempotency_key") @JsonAlias("idempotencyKey") String idempotencyKey
     ) {
     }
 
     private final PlanningService planning;
     private final PlanSessionStore sessions;
+    private final PlanAcceptService acceptService;
 
-    public PlanSessionController(PlanningService planning, PlanSessionStore sessions) {
+    public PlanSessionController(PlanningService planning, PlanSessionStore sessions, PlanAcceptService acceptService) {
         this.planning = planning;
         this.sessions = sessions;
+        this.acceptService = acceptService;
     }
 
     @PostMapping
@@ -87,12 +97,29 @@ public class PlanSessionController {
 
         return planning.revise(new PlanningService.RevisePlanInput(
                 userId,
+                sessionId,
                 mealDate,
                 String.valueOf(session.get("meal_type")),
                 request.currentMenu() == null ? List.of() : request.currentMenu(),
                 request.constraints() == null
                         ? new ReplaceConstraints(null, null, null, null, null)
-                        : request.constraints()
+                        : request.constraints(),
+                request.userFeedback()
+        ));
+    }
+
+    /** 原子接受配餐：会话校验 → 生成可编辑草稿（commit=false）或直接记录（commit=true）→ 幂等 → 状态迁移。 */
+    @PostMapping("/{sessionId}/accept")
+    public PlanAcceptService.AcceptPlanResult accept(
+            @CurrentUserId String userId,
+            @PathVariable String sessionId,
+            @RequestBody AcceptRequest request
+    ) {
+        return acceptService.acceptPlan(new PlanAcceptService.AcceptPlanInput(
+                userId,
+                sessionId,
+                !Boolean.FALSE.equals(request.commit()),
+                request.idempotencyKey()
         ));
     }
 

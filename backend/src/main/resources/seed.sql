@@ -51,12 +51,14 @@ merge into recipe_ingredients (id, recipe_id, food_id, amount_g) key (id) values
   ('ri_tomato_egg_001', 'r_tomato_egg_001', 'f_egg_001', 120),
   ('ri_tomato_egg_002', 'r_tomato_egg_001', 'f_tomato_001', 100);
 
+-- 规则硬/软边界（2026-10-30 重构写死）：R01/R02/R03/R06/R08/R09 为硬，R04/R05/R07 为软。
 merge into validation_rules (rule_id, severity, threshold, weight, version, enabled) key (rule_id) values
-  ('R01_ALLERGEN', 'hard', '{}', '{}', '2026-10-26.1', true),
-  ('R02_AVOID', 'hard', '{}', '{}', '2026-10-26.1', true),
-  ('R03_FOOD_VALID', 'hard', '{}', '{}', '2026-10-26.1', true),
-  ('R04_NUTRIENT_RANGE', 'hard', '{"tolerance":0.2}', '{"breakfast":0.25,"lunch":0.35,"dinner":0.3,"snack":0.1}', '2026-10-26.1', true),
-  ('R05_STRUCTURE', 'hard', '{"minVegetableG":{"breakfast":50,"lunch":100,"dinner":100,"snack":0}}', '{}', '2026-10-26.1', true),
-  ('R06_REPLACE_REQUEST', 'hard', '{}', '{}', '2026-10-26.1', true),
-  ('R07_DUPLICATE', 'soft', '{}', '{}', '2026-10-26.1', true),
-  ('R08_SCOPE', 'hard', '{}', '{}', '2026-10-26.1', true);
+  ('R01_ALLERGEN', 'hard', '{}', '{}', '2026-10-30.1', true),
+  ('R02_AVOID', 'hard', '{}', '{}', '2026-10-30.1', true),
+  ('R03_FOOD_VALID', 'hard', '{}', '{}', '2026-10-30.1', true),
+  ('R04_NUTRIENT_RANGE', 'soft', '{"tolerance":0.2}', '{"breakfast":0.25,"lunch":0.35,"second_main":0.35,"dinner":0.3,"snack":0.1,"night_snack":0.1}', '2026-10-30.1', true),
+  ('R05_STRUCTURE', 'soft', '{"minVegetableG":{"breakfast":50,"lunch":100,"second_main":100,"dinner":100,"snack":0,"night_snack":0}}', '{}', '2026-10-30.1', true),
+  ('R06_REPLACE_REQUEST', 'hard', '{}', '{}', '2026-10-30.1', true),
+  ('R07_DUPLICATE', 'soft', '{}', '{}', '2026-10-30.1', true),
+  ('R08_SCOPE', 'hard', '{}', '{}', '2026-10-30.1', true),
+  ('R09_AI_UNCONFIRMED', 'hard', '{}', '{}', '2026-10-30.1', true);

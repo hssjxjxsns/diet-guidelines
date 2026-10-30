@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api } from '../api/client';
 import type { Nutrients, UserSettings } from '../api/types';
 import { Button, Chip } from '../ui/common';
@@ -95,7 +95,8 @@ export function SettingsScreen() {
     );
   }
 
-  async function save() {
+  /** 字段级 PATCH；过敏原变更需显式确认（弹窗），避免被误清空。 */
+  async function save(confirmAllergenChange?: boolean) {
     setBusy(true);
     setError(null);
     setMessage(null);
@@ -111,12 +112,30 @@ export function SettingsScreen() {
         dailyTargets,
         preferences: split(preferences),
         allergens: split(allergens),
-        avoid: split(avoid)
+        avoid: split(avoid),
+        ...(confirmAllergenChange ? { confirmAllergenChange: true } : {})
       });
       setMessage('已保存');
       await load();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : '保存失败');
+      const apiError = requestError as { message?: string; details?: unknown };
+      const isAllergenConfirm =
+        typeof apiError.message === 'string' && apiError.message.includes('过敏原');
+      if (isAllergenConfirm && confirmAllergenChange !== true) {
+        const details = apiError.details as { current?: string[]; requested?: string[] } | undefined;
+        Alert.alert(
+          '确认修改过敏原',
+          `过敏原影响提交校验（硬规则拦截）。\n当前：${(details?.current ?? []).join('、') || '无'}\n改为：${
+            (details?.requested ?? []).join('、') || '无'
+          }`,
+          [
+            { text: '取消', style: 'cancel' },
+            { text: '确认修改', style: 'destructive', onPress: () => void save(true) }
+          ]
+        );
+      } else {
+        setError(apiError.message ?? '保存失败');
+      }
     } finally {
       setBusy(false);
     }

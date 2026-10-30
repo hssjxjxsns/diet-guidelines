@@ -1,17 +1,17 @@
 package com.dietguide.web;
 
-import com.dietguide.domain.MealEntry;
+import com.dietguide.domain.MealDraftItem;
 import com.dietguide.domain.MealGroup;
-import com.dietguide.domain.MealInputItem;
-import com.dietguide.domain.SubmitMealInput;
 import com.dietguide.domain.SubmitMealResult;
 import com.dietguide.service.MealGroupService;
-import com.dietguide.service.MealGroupStore;
 import com.dietguide.shared.AppException;
 import com.dietguide.web.security.CurrentUserId;
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -21,36 +21,60 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 记录主流程端点：开餐（惰性建组）→ item 级草稿编辑 → commit。
+ * 不再提供"先建空组"与绕过草稿的直接写入入口。
+ */
 @RestController
 @RequestMapping("/meal-groups")
 public class MealGroupController {
 
-    public record CreateGroupRequest(
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record OpenDraftRequest(
             @JsonProperty("meal_date") @JsonAlias("mealDate") LocalDate mealDate,
             @JsonProperty("meal_type") @JsonAlias("mealType") String mealType,
             @JsonProperty("instance_seq") @JsonAlias("instanceSeq") Integer instanceSeq
     ) {
     }
 
-    public record SubmitMealRequest(
-            String mode,
-            @JsonProperty("base_revision") @JsonAlias("baseRevision") Integer baseRevision,
-            @JsonProperty("idempotency_key") @JsonAlias("idempotencyKey") String idempotencyKey,
-            List<MealInputItem> items,
-            @JsonProperty("nutrition_data_version") @JsonAlias("nutritionDataVersion") String nutritionDataVersion
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record DraftItemRequest(
+            String foodId,
+            @JsonProperty("recipe_id") @JsonAlias("recipeId") String recipeId,
+            @JsonProperty("raw_name") @JsonAlias("rawName") String rawName,
+            @JsonProperty("amount_g") @JsonAlias("amountG") Double amountG,
+            @JsonProperty("value_type") @JsonAlias("valueType") String valueType,
+            @JsonProperty("ai_source") @JsonAlias("aiSource") String aiSource,
+            Boolean confirmed,
+            @JsonProperty("draft_revision") @JsonAlias("draftRevision") Integer draftRevision
+    ) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record DraftItemPatchRequest(
+            String foodId,
+            @JsonProperty("recipe_id") @JsonAlias("recipeId") String recipeId,
+            @JsonProperty("raw_name") @JsonAlias("rawName") String rawName,
+            @JsonProperty("amount_g") @JsonAlias("amountG") Double amountG,
+            @JsonProperty("value_type") @JsonAlias("valueType") String valueType,
+            @JsonProperty("confirmation_status") @JsonAlias("confirmationStatus") String confirmationStatus,
+            @JsonProperty("draft_revision") @JsonAlias("draftRevision") Integer draftRevision
+    ) {
+    }
+
+    public record CommitRequest(
+            @JsonProperty("draft_revision") @JsonAlias("draftRevision") Integer draftRevision,
+            @JsonProperty("idempotency_key") @JsonAlias("idempotencyKey") String idempotencyKey
     ) {
     }
 
     private final MealGroupService meals;
-    private final MealGroupStore store;
 
-    public MealGroupController(MealGroupService meals, MealGroupStore store) {
+    public MealGroupController(MealGroupService meals) {
         this.meals = meals;
-        this.store = store;
     }
 
     @GetMapping
@@ -64,63 +88,96 @@ public class MealGroupController {
         return meals.getDay(userId, parseDate(date));
     }
 
-    @PostMapping
-    public MealGroup create(@CurrentUserId String userId, @RequestBody CreateGroupRequest request) {
+    @GetMapping("/{groupId}")
+    public Map<String, Object> get(@CurrentUserId String userId, @PathVariable String groupId) {
+        return meals.getGroup(userId, groupId);
+    }
+
+    /** 开餐：惰性建 draft 分组（24h 过期），同餐次已有活跃草稿则复用。 */
+    @PostMapping("/drafts")
+    public MealGroup openDraft(@CurrentUserId String userId, @RequestBody OpenDraftRequest request) {
         if (request.mealDate() == null || request.mealType() == null) {
             throw AppException.validation("meal_date and meal_type are required");
         }
-        return store.createGroup(new MealGroup.Draft(
-                userId,
-                request.mealDate(),
-                request.mealType(),
-                request.instanceSeq() == null ? 1 : request.instanceSeq(),
-                "active"
-        ));
+        return meals.ensureDraft(userId, request.mealDate(), request.mealType(), request.instanceSeq());
     }
 
-    @GetMapping("/{groupId}")
-    public Map<String, Object> get(@CurrentUserId String userId, @PathVariable String groupId) {
-        MealGroup group = store.findGroup(userId, groupId);
-        if (group == null) {
-            throw AppException.notFound("meal group");
-        }
-
-        List<MealEntry> entries = store.listEntries(groupId);
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("group", group);
-        payload.put("entries", entries);
-        return payload;
-    }
-
-    @PostMapping("/{groupId}/entries")
-    public SubmitMealResult submit(
+    @PostMapping("/{groupId}/draft/items")
+    public MealDraftItem addItem(
             @CurrentUserId String userId,
             @PathVariable String groupId,
-            @RequestBody SubmitMealRequest request
+            @RequestBody DraftItemRequest request
     ) {
-        MealGroup group = store.findGroup(userId, groupId);
-        if (group == null) {
-            throw AppException.notFound("meal group");
-        }
+        requireRawName(request.rawName());
+        requireAmount(request.amountG());
+        return meals.addDraftItem(userId, groupId, new MealDraftItem(
+                null, groupId, userId, request.foodId(), request.recipeId(), request.rawName(),
+                request.amountG(), request.valueType(), null, request.aiSource(),
+                Boolean.TRUE.equals(request.confirmed()) ? "confirmed" : "pending",
+                null, null, null
+        ), request.draftRevision());
+    }
 
+    @PatchMapping("/{groupId}/draft/items/{itemId}")
+    public MealDraftItem updateItem(
+            @CurrentUserId String userId,
+            @PathVariable String groupId,
+            @PathVariable String itemId,
+            @RequestBody DraftItemPatchRequest request
+    ) {
+        return meals.updateDraftItem(userId, groupId, itemId, new MealDraftItem(
+                itemId, groupId, userId, request.foodId(), request.recipeId(), request.rawName(),
+                request.amountG() == null ? 0 : request.amountG(), request.valueType(), null, null,
+                request.confirmationStatus(), null, null, null
+        ), request.draftRevision());
+    }
+
+    @DeleteMapping("/{groupId}/draft/items/{itemId}")
+    public Map<String, Object> removeItem(
+            @CurrentUserId String userId,
+            @PathVariable String groupId,
+            @PathVariable String itemId,
+            @RequestParam(required = false) Integer draftRevision
+    ) {
+        meals.removeDraftItem(userId, groupId, itemId, draftRevision);
+        return Map.of("ok", true);
+    }
+
+    /** 复制上一餐：最近一条已提交餐次的有效 items 复制进当前草稿。 */
+    @PostMapping("/{groupId}/draft/copy-previous")
+    public Map<String, Object> copyPrevious(
+            @CurrentUserId String userId,
+            @PathVariable String groupId,
+            @RequestBody(required = false) CommitRequest request
+    ) {
+        List<MealDraftItem> copies = meals.copyPrevious(
+                userId, groupId, request == null ? null : request.draftRevision());
+        return Map.of("items", copies);
+    }
+
+    /** commit：草稿 → 正式记录（规则校验 + 事务 + 幂等 + 聚合 + 报表 stale + 草稿转 logged）。 */
+    @PostMapping("/{groupId}/draft/commit")
+    public SubmitMealResult commit(
+            @CurrentUserId String userId,
+            @PathVariable String groupId,
+            @RequestBody CommitRequest request
+    ) {
         if (request.idempotencyKey() == null || request.idempotencyKey().isBlank()) {
             throw AppException.validation("idempotency_key is required");
         }
-        if (request.mode() == null) {
-            throw AppException.validation("mode is required");
-        }
+        return meals.commitDraft(userId, groupId, request.draftRevision(), request.idempotencyKey());
+    }
 
-        return meals.submit(new SubmitMealInput(
-                userId,
-                group.mealDate(),
-                group.mealType(),
-                group.instanceSeq(),
-                request.mode(),
-                request.baseRevision(),
-                request.idempotencyKey(),
-                request.items() == null ? List.of() : request.items(),
-                request.nutritionDataVersion() == null ? "demo-1" : request.nutritionDataVersion()
-        ));
+    private static void requireRawName(String rawName) {
+        if (rawName == null || rawName.isBlank()) {
+            throw AppException.validation("raw_name is required");
+        }
+    }
+
+    private static void requireAmount(Double amountG) {
+        if (amountG == null || amountG <= 0) {
+            throw AppException.validation("amount_g must be positive");
+        }
     }
 
     private static LocalDate parseDate(String value) {

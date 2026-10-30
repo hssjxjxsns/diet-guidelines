@@ -13,8 +13,9 @@ type Tab = 'today' | 'reports' | 'settings';
 
 interface EditorState {
   mealType: MealType;
-  edit?: { groupId: string; baseRevision: number };
-  initialItems?: MealEntryItem[];
+  /** 修正已记录餐次：携带 instanceSeq 以重开该组的版本链。 */
+  editInstanceSeq?: number;
+  initialNames?: string[];
 }
 
 const TABS: Array<{ key: Tab; label: string }> = [
@@ -39,11 +40,11 @@ export default function App() {
             date={date}
             onChangeDate={setDate}
             onAdd={(mealType) => setEditor({ mealType })}
-            onEdit={({ group, items, baseRevision }) =>
+            onEdit={({ group, items }) =>
               setEditor({
                 mealType: group.mealType,
-                edit: { groupId: group.id, baseRevision },
-                initialItems: items
+                editInstanceSeq: group.instanceSeq,
+                initialNames: items.map((item) => item.rawName)
               })
             }
             onRefreshRequest={() => setRefreshToken((value) => value + 1)}
@@ -71,10 +72,11 @@ export default function App() {
       <Modal visible={editor !== null} animationType="slide" onRequestClose={() => setEditor(null)}>
         {editor ? (
           <AddMealScreen
+            key={`${editor.mealType}-${editor.editInstanceSeq ?? 'new'}-${refreshToken}`}
             date={date}
             mealType={editor.mealType}
-            edit={editor.edit}
-            initialItems={editor.initialItems}
+            editInstanceSeq={editor.editInstanceSeq}
+            initialNames={editor.initialNames}
             onClose={() => setEditor(null)}
             onSubmitted={() => {
               setEditor(null);

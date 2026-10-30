@@ -1,9 +1,13 @@
 package com.dietguide.service;
 
+import com.dietguide.domain.MealDraftItem;
+import com.dietguide.domain.MealGroup;
 import com.dietguide.domain.MealInputItem;
 import com.dietguide.domain.SubmitMealInput;
 import com.dietguide.domain.SubmitMealResult;
+import com.dietguide.domain.UserSettings;
 import com.dietguide.nutrition.NutritionEngine;
+import com.dietguide.nutrition.RuleEngine;
 import com.dietguide.shared.AppException;
 import com.dietguide.support.Fixtures;
 import com.dietguide.support.MemoryFoodRepository;
@@ -22,11 +26,29 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class MealGroupServiceTest {
 
     private static final LocalDate DATE = LocalDate.of(2026, 10, 27);
+    private static final UserSettings EMPTY_SETTINGS =
+            new UserSettings(com.dietguide.nutrition.Targets.DEFAULT_DAILY_TARGETS, List.of(), List.of(), List.of());
 
     private final ObjectMapper mapper = JsonMapper.builder().addModule(new JavaTimeModule()).build();
     private final MemoryFoodRepository foods = Fixtures.repository();
     private final MemoryMealGroupStore store = new MemoryMealGroupStore();
-    private final MealGroupService service = new MealGroupService(store, new NutritionEngine(foods), mapper);
+    private final NutritionEngine engine = new NutritionEngine(foods);
+    private final MealGroupService service = new MealGroupService(
+            store,
+            engine,
+            new DailyStatsAggregator(engine),
+            new RecordValidationService(new RuleEngine(foods, engine)),
+            new SettingsStore() {
+                @Override
+                public UserSettings getSettings(String userId) {
+                    return EMPTY_SETTINGS;
+                }
+
+                @Override
+                public void saveSettings(String userId, UserSettings value) {
+                }
+            },
+            mapper);
 
     @Test
     void appendsThenReplacesAndKeepsOnlyReplaceEffective() {
