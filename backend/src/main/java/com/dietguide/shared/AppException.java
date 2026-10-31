@@ -39,6 +39,10 @@ public class AppException extends RuntimeException {
         return new AppException("VALIDATION_FAILED", message, HttpStatus.UNPROCESSABLE_ENTITY, null);
     }
 
+    public static AppException validation(String message, Object details) {
+        return new AppException("VALIDATION_FAILED", message, HttpStatus.UNPROCESSABLE_ENTITY, details);
+    }
+
     public static AppException idempotencyConflict() {
         return new AppException(
                 "IDEMPOTENCY_CONFLICT",

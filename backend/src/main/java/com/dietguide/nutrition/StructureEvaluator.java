@@ -34,7 +34,22 @@ public final class StructureEvaluator {
             String mealType,
             int distinctFoodCount
     ) {
-        double share = Targets.mealWeight(mealType);
+        return evaluate(amounts, Targets.mealWeight(mealType), distinctFoodCount);
+    }
+
+    /** 全天口径结构评估：直接对照每日推荐区间（share=1）。供 DailyStatsAggregator 使用。 */
+    public static StructureResult evaluateDailyStructure(
+            Map<String, Double> amounts,
+            int distinctFoodCount
+    ) {
+        return evaluate(amounts, 1.0, distinctFoodCount);
+    }
+
+    private static StructureResult evaluate(
+            Map<String, Double> amounts,
+            double share,
+            int distinctFoodCount
+    ) {
         List<FoodGroupStatus> groups = new ArrayList<>();
 
         for (Map.Entry<String, List<Double>> entry : DAILY_STRUCTURE_RANGES.entrySet()) {

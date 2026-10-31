@@ -1,6 +1,8 @@
-export type MealType = 'breakfast' | 'lunch' | 'dinner' | 'snack';
+export type MealType = 'breakfast' | 'lunch' | 'second_main' | 'dinner' | 'snack' | 'night_snack';
 
 export type ValueType = 'measured' | 'estimated' | 'ai_estimated';
+
+export type ConfirmationStatus = 'pending' | 'confirmed' | 'rejected';
 
 export interface Nutrients {
   energyKcal?: number;
@@ -20,6 +22,8 @@ export interface MealEntryItem {
   amountG: number;
   valueType: ValueType;
   nutrients: Nutrients;
+  aiSource?: string | null;
+  confirmationStatus?: string;
 }
 
 export interface MealEntry {
@@ -41,34 +45,14 @@ export interface MealGroup {
   mealDate: string;
   mealType: MealType;
   instanceSeq: number;
-  status: 'active' | 'closed';
+  status: 'draft' | 'logged' | 'abandoned';
+  draftRevision: number;
+  expiresAt?: string | null;
+  committedAt?: string | null;
   createdAt: string;
 }
 
-export interface DaySummary {
-  groups: Array<{ group: MealGroup; entries: MealEntry[]; effective: MealEntry[] }>;
-  dailyTotals: Nutrients;
-}
-
-export interface SubmitMealItemInput {
-  foodId?: string;
-  recipeId?: string;
-  rawName: string;
-  amountG: number;
-  valueType?: ValueType;
-  /** AI 直接估算时携带结构化结果，由后端换算区间营养。 */
-  analysis?: DishAnalysis;
-}
-
-export interface SubmitMealRequest {
-  mode: 'append' | 'replace';
-  /** replace 必填，取当前最新 revision，用于并发冲突检测。 */
-  base_revision?: number;
-  idempotency_key: string;
-  items: SubmitMealItemInput[];
-  nutrition_data_version?: string;
-}
-
+/** item 级餐次草稿：确认态的唯一载体（ai_source 非空为 AI 项，commit 前必须 confirmed）。 */
 export interface SubmitMealResult {
   group: MealGroup;
   entry: MealEntry;
@@ -76,15 +60,42 @@ export interface SubmitMealResult {
   dailyTotals: Nutrients;
 }
 
-export interface Food {
+export interface MealDraftItem {
   id: string;
-  name: string;
-  aliases?: string[];
-  category?: string;
-  nutrientsPer100g: Nutrients;
-  edibleRatio: number;
-  tags?: string[];
-  allergens?: string[];
+  groupId: string;
+  userId: string;
+  foodId?: string | null;
+  recipeId?: string | null;
+  rawName: string;
+  amountG: number;
+  valueType: string;
+  aiSource?: string | null;
+  confirmationStatus: ConfirmationStatus;
+  confirmedBy?: string | null;
+  confirmedAt?: string | null;
+  createdAt: string;
+}
+
+export interface StructureResult {
+  foodGroups: Array<{
+    group: string;
+    amountG: number;
+    recommendedRangeG: number[];
+    status: string;
+  }>;
+  distinctFoodCount?: number;
+  note?: string;
+}
+
+export interface DaySummary {
+  groups: Array<{
+    group: MealGroup;
+    entries: MealEntry[];
+    effective: MealEntry[];
+    draftItems: MealDraftItem[];
+  }>;
+  dailyTotals: Nutrients;
+  structure?: StructureResult | null;
 }
 
 export interface DishAnalysis {
@@ -103,6 +114,35 @@ export interface DishAnalysis {
   needsUserConfirm?: boolean;
 }
 
+export interface Food {
+  id: string;
+  name: string;
+  aliases?: string[];
+  category?: string;
+  nutrientsPer100g: Nutrients;
+  edibleRatio: number;
+  tags?: string[];
+  allergens?: string[];
+}
+
+/** AI 识别候选：一律待确认，确认/改量/删除/换食物后才允许进草稿。 */
+export interface AiCandidateItem {
+  rawName: string;
+  foodId?: string | null;
+  amountG: number;
+  valueType: string;
+  aiSource: string;
+  confirmationStatus: 'pending';
+  requiresUserConfirm: boolean;
+}
+
+export interface ParseResponse {
+  analysis: DishAnalysis;
+  candidateId?: string | null;
+  candidateItems: AiCandidateItem[];
+  requiresConfirmation: boolean;
+}
+
 export interface UserSettings {
   dailyTargets: Nutrients;
   preferences: string[];
@@ -110,11 +150,32 @@ export interface UserSettings {
   avoid: string[];
 }
 
+export interface FoodGroupAdherence {
+  group: string;
+  averageG: number;
+  recommendedRangeG: number[];
+  adherenceRate: number;
+  status: string;
+}
+
 export interface PeriodReport {
   periodType: 'weekly' | 'monthly';
   periodStart: string;
   periodEnd: string;
-  stats: { days: number; total: Nutrients; average: Nutrients };
+  stats: {
+    days: number;
+    total: Nutrients;
+    average: Nutrients;
+    foodGroups?: FoodGroupAdherence[];
+    guideline?: {
+      structureNonEmptyRate?: number;
+      diversityOkDays?: number;
+      oilWithinLimitDays?: number;
+      sodiumAverageMg?: number;
+      sodiumWithinLimit?: boolean;
+      conclusion?: string;
+    };
+  };
   aiSummary?: string;
   status?: string;
 }
@@ -152,4 +213,18 @@ export interface PlanResult {
   };
   gap?: { remaining?: Nutrients; unloggedMeals?: string[] };
   fallback?: boolean;
+  /** source ∈ AI | RULE_FALLBACK:版本号（如 AI:2）。 */
+  source?: string;
+}
+
+export interface AcceptPlanResult {
+  groupId: string;
+  sessionId: string;
+  status: 'ACCEPTING' | 'LOGGED';
+  result?: {
+    group: MealGroup;
+    entry: MealEntry;
+    effectiveEntries: MealEntry[];
+    dailyTotals: Nutrients;
+  } | null;
 }

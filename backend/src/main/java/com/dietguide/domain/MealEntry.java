@@ -27,7 +27,23 @@ public record MealEntry(
             double amountG,
             String valueType,
             Map<String, Double> nutrients,
-            DishAnalysis analysis
+            DishAnalysis analysis,
+            String aiSource,
+            String confirmationStatus,
+            String confirmedBy,
+            String confirmedAt
     ) {
+
+        public Item(
+                String foodId,
+                String recipeId,
+                String rawName,
+                double amountG,
+                String valueType,
+                Map<String, Double> nutrients,
+                DishAnalysis analysis
+        ) {
+            this(foodId, recipeId, rawName, amountG, valueType, nutrients, analysis, null, "confirmed", null, null);
+        }
     }
 }

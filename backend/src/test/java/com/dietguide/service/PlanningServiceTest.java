@@ -32,7 +32,8 @@ class PlanningServiceTest {
 
     private final ObjectMapper mapper = JsonMapper.builder().addModule(new JavaTimeModule()).build();
     private final MemoryFoodRepository foods = Fixtures.repository();
-    private final PlanValidator validator = new PlanValidator(foods, new NutritionEngine(foods));
+    private final RecordValidationService validator =
+            new RecordValidationService(new com.dietguide.nutrition.RuleEngine(foods, new NutritionEngine(foods)));
 
     @Test
     void returnsValidatedPlanAndPersistsSession() {

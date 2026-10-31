@@ -1,5 +1,7 @@
 # 膳食指南 AI App - 技术架构文档
 
+> **2026-10-30 业务流程重构说明**：本文档已按"记录主流程重排"更新。核心变化：① 记录是唯一主流程，删除"先建空组"与直写 entry 入口；② AI 输出一律是候选（确认态在 `meal_draft_items`，R09 硬拦未确认 AI 项）；③ 记录与配餐共用同一 `RuleEngine`（R01–R09）；④ `DailyStatsAggregator` 是日口径唯一真相源，`daily_stats.structure` 必须落库；⑤ "接受配餐"是原子用例（`POST /plan-sessions/{id}/accept`，复用 commit 用例），`/complete` 仅结束规划。
+
 | 项目 | 内容 |
 | --- | --- |
 | 文档版本 | v1.1 |
@@ -296,56 +298,46 @@ interface NutritionResult {
 
 ### 5.2 规划会话服务
 
-**职责**：管理一次“规划下一餐”的完整生命周期，隔离规划数据与实际摄入。
+**职责**：管理一次"规划下一餐"的完整生命周期，隔离规划数据与实际摄入。
 
-* 会话状态：`planning` → `awaiting_log` →（由记录服务推进）`logged` / `analyzed`；异常时 `abandoned`。
-* 会话恢复：所有消息与候选餐单落库，客户端重进可恢复；用户选择重新开始时旧会话置为 `abandoned`。
-* 上下文构建：由 `ContextBuilder` 组装（见 §9），**禁止直接拼接原始饮食流水**。
-* 换菜闭环：AI 生成 → 校验引擎（见 §5.8）→ 返回结构化 `failed_rules` → 携带失败项重生成（最多 2 次）→ 仍失败则由规则引擎从食物库兜底。
-* 校验项：过敏原、忌口、营养合理性、膳食结构、食物有效性、用户替换要求，全部在 §5.8 定义阈值与输出契约。
-* 可解释性：每个候选菜品携带 `reason`、`citations`、缺口快照与校验结果；`plan_sessions.context_snapshot` 与 `validation_result` 落库，用户可查看“为什么推荐这道菜”。
+* 会话状态机：`planning` → `accepting` →（acceptPlan commit 成功）`logged` /（失败）`failed`；`closed` 仅表示"结束规划"（`/complete`），**不再写 `awaiting_log`、不再与记录混写**。
+* 原子接受配餐：`POST /plan-sessions/{id}/accept` 单事务完成"会话校验 → 生成可编辑草稿（`commit=false`）或直接记录（`commit=true`）→ 幂等 → 状态迁移"；**内部复用记录服务的同一 commit 用例**，不另写第二条写路径。重复调用（同幂等键，accept 层键为 `accept:<key>`）返回同一结果；失败事务回滚无半成品、可重试。
+* 会话恢复：所有消息与候选餐单落库，客户端重进可恢复；会话带 `current_revision` 与 `accepted_group_id`。
+* 上下文构建：由 `ContextBuilder` 组装（见 §9），**本餐目标 = 全天目标 × 餐次权重（`Targets.mealTarget`）为本餐设计依据，全天缺口（`gap`）仅作提示**，不再按"剩余缺口平均分给未记录餐次"分配。
+* 换菜 = 版本化修订：同一会话内生成新 revision（`plan_revisions` 保存当前方案/`user_feedback`/约束/校验结果，`base_revision` 指向上一版），基于 `currentMenu` 做最小改动，可对比/回滚；不再"重新生成一个新会话"。
+* 换菜闭环：AI 生成 → 共享规则引擎（见 §5.8）→ 返回结构化 `failed_rules` → 携带失败项重生成（最多 2 次）→ 仍失败则规则引擎按本餐目标与结构区间兜底，并标 `source=RULE_FALLBACK`（AI 成功为 `AI`）。
+* 可解释性：每个候选菜品携带 `reason`、`citations`、缺口快照与校验结果；`plan_sessions.context_snapshot` 与 `validation_result` 落库。
 
 ### 5.3 记录服务
 
-**职责**：接收实际饮食、维护版本链与幂等、触发统计更新。允许同一餐次分多次补录，统计只取当前有效版本。
+**职责**：接收实际饮食、维护版本链与幂等、触发统计更新。记录是**唯一主流程**：开餐（惰性建组）→ item 级草稿编辑 → 规则校验 → commit（事务+幂等）。
 
 **四个概念**
 
 | 概念 | 说明 | 数据载体 |
 | --- | --- | --- |
-| 餐次 | 早餐、午餐、晚餐、加餐；加餐可有多次 | `meal_groups.meal_type` |
-| 餐次组 | 一次逻辑用餐实例，是版本链的归属单位 | `meal_groups` |
-| 餐次记录 | 用户某一次提交或修改的版本 | `meal_entries` |
-| 餐次明细 | 该版本中的具体食物与数量 | `meal_entry_items` |
+| 餐次 | 早餐、午餐、第二顿、晚餐、加餐、夜宵；加餐/夜宵可多实例 | `meal_groups.meal_type` |
+| 餐次组 | 一次逻辑用餐实例，是版本链的归属单位；状态 `draft / logged / abandoned` | `meal_groups` |
+| 餐次草稿 | item 级可编辑草稿，**也是 AI 确认态的唯一载体** | `meal_draft_items` |
+| 餐次记录 | commit 产生的版本（审计用） | `meal_entries` → `meal_entry_items` |
 
-**餐次组规则**
+**草稿生命周期（写死）**
 
-* `meal_groups` 唯一键为 `(user_id, meal_date, meal_type, instance_seq)`。
-* 早餐/午餐/晚餐默认 `instance_seq = 1`；加餐允许多个实例（如下午茶、夜宵），每次新建一个 `instance_seq`。
-* 不再对 `(user_id, meal_date, meal_type)` 建唯一索引——那会阻止补录与多次加餐。
+* 开餐 `POST /meal-groups/drafts`：惰性建 `draft` 组（带 24h `expires_at`）；同 `(meal_type, seq)` 已有草稿则复用；已有 `logged` 组则**重开为草稿**（`reopen_draft`，保留版本链，commit 在该组产生新 revision）。非 snack/night_snack 固定 `instance_seq=1`；snack/night_snack 多实例取 `max(seq)+1`。
+* item 级编辑：`POST /draft/items`、`PATCH /draft/items/{itemId}`（改量/换食物/确认 AI 项）、`DELETE`、`copy-previous`；每次写操作 `draft_revision` +1 作乐观锁，冲突返回 `409 MEAL_REVISION_CONFLICT`。确认动作幂等（同 itemId + 目标 `confirmation_status` 直接返回）。
+* 过期清理：`getDay`/清理任务将 `expires_at` 已过的草稿置 `abandoned` 并清理草稿项。
+* commit `POST /meal-groups/{id}/draft/commit`（单事务）：幂等 → 草稿归属/过期/乐观锁校验 → **共享规则引擎记录侧校验（硬规则 422）** → 草稿项转正式 entry（一条新 revision，`confirmation_status/ai_source` 随迁）→ `DailyStatsAggregator` 物化当日 `daily_stats`（metrics+structure）→ 标记周期报告 `stale` → 组转 `logged`、清空草稿项。空草稿或存在未确认 AI 项（R09）拒绝提交。
 
-**提交语义（必须显式声明，不允许隐式覆盖）**
+**提交语义（内部保留，用户操作收敛为草稿）**
 
-| 模式 | 行为 | 适用场景 |
-| --- | --- | --- |
-| `append`（补录） | 在餐次组内追加一条记录，保留此前有效内容 | 午餐已记录米饭和鸡肉，稍后补录一杯饮料 |
-| `replace`（修正） | 以新版本取代此前的有效集合，须携带 `base_revision` | 用户发现重量写错、删除某项、整餐重录 |
-
-* 有效集合定义：`最新一条 replace 记录 + 其后所有 append 记录`；此前的版本进入历史，不参与统计。
-* 删除单项等价于提交一条 `replace`，内容为删除后的完整清单。
-* 统计与报告只读有效集合，任何旧版本都不得重复累计。
+* 有效集合定义：`最新一条 replace 记录 + 其后所有 append 记录`（`MealVersion.effective()`）；旧版本进入历史，不参与统计。
+* 版本链只追加不物理删除；修正 = 重开草稿后 commit 产生新 `append` revision，不再要求用户整组 `replace`。
 
 **幂等与并发**
 
-* 幂等键：`(user_id, idempotency_key)` 为主键；重复提交返回首次结果，不产生新版本。
-* 并发控制：对 `group_id` 加事务级 advisory lock；`replace` 请求校验 `base_revision`，不匹配返回 `409 MEAL_REVISION_CONFLICT`，并回传当前版本供客户端合并。
-* 事务边界：写入记录与明细 → 重算该组有效集合 → 更新当日统计 → 标记相关周期报告 `stale`；同一事务提交。
-
-**历史与统计**
-
-* 版本链只追加不物理删除，保留修改痕迹与操作时间。
-* `daily_stats` 按“当日所有餐次组的有效集合”汇总；多个加餐组分别计入，不合并为一条。
-* 记录新增、补录、修正、删除都会触发受影响日期的重算（见 §8.3）。
+* 幂等键：`(user_id, idempotency_key)` 为主键 + `request_hash` 内容比对；重复提交返回首次结果。commit 与 acceptPlan 各自独立键作用域（`meal_entry` / `plan_accept`）。
+* 并发控制：`draft_revision` 乐观锁；不匹配返回 `409 MEAL_REVISION_CONFLICT`。
+* 事务边界：写入记录与明细 → 重算该组有效集合 → 聚合更新当日统计 → 标记相关周期报告 `stale`；同一事务提交。
 
 ### 5.4 报告服务
 
@@ -410,22 +402,23 @@ interface ChatOptions {
 * 日志：记录 `trace_id`、场景、模型、输入/输出 Token、时延、状态、prompt 版本；不记录完整敏感原文。
 * 降级：AI 不可用时，规划退化为“规则引擎 + 食物库”生成候选，报告仅输出统计与固定模板文字。
 
-### 5.8 校验规则引擎（Plan Validator）
+### 5.8 校验规则引擎（RuleEngine，共享）
 
-**定位**：独立模块，不依赖 AI。输入「候选餐单 + 当日上下文 + 用户设置」，输出结构化判定。规则与阈值存于 `validation_rules` 表并版本化，禁止散落在代码里由开发者临时决定。
+**定位**：独立模块，不依赖 AI，**记录提交与配餐生成调用同一实例**（配餐侧 `PlanValidator`、记录侧 `RecordValidationService` 均包装 `RuleEngine.runChecks`），禁止两套校验逻辑。输入「候选/草稿项 + 当日上下文 + 用户设置」，输出结构化判定。规则与阈值存于 `validation_rules` 表并版本化。
 
-**规则清单**
+**规则清单（硬/软边界写死）**
 
-| rule_id | 校验项 | 后端动作 | 阈值/依据 | 级别 |
+| rule_id | 校验项 | 生效范围 | 后端动作 | 级别 |
 | --- | --- | --- | --- | --- |
-| `R01_ALLERGEN` | 过敏原 | 展开菜品与配方原料后归一化比对，命中即失败，无例外 | 用户明确设置 | hard |
-| `R02_AVOID` | 忌口 | 命中用户明确不接受的食物则失败或过滤 | 用户设置 | hard |
-| `R03_FOOD_VALID` | 食物有效性 | `food_id` 必须存在于 `active` 食物库；复合菜品须能映射到有效配方 | `status = active` | hard |
-| `R04_NUTRIENT_RANGE` | 营养合理性 | 计算候选餐单营养，与本餐合理范围比较（见下） | 动态范围 | hard |
-| `R05_STRUCTURE` | 膳食结构 | 检查食物组构成，避免只满足能量却缺少蔬菜 | 指南 + 配置 | soft/hard |
-| `R06_REPLACE_REQUEST` | 用户替换要求 | AI 先把自然语言要求转为结构化约束，再逐条确定性校验 | 本次请求 | hard |
-| `R07_DUPLICATE` | 重复菜品 | 同一餐内不得重复同一菜品 | 配置 | soft |
-| `R08_SCOPE` | 医疗边界 | 不做疾病判断与诊断；涉及治疗建议时改为一般膳食建议 | 合规 | hard |
+| `R01_ALLERGEN` | 过敏原 | 两者 | 展开后归一化比对，命中即 422 阻断 / 不能出现在方案 | hard |
+| `R02_AVOID` | 忌口 | 两者 | 命中则 422 阻断 / 过滤 | hard |
+| `R03_FOOD_VALID` | 食物有效性 | 两者 | `food_id` 须在 `active` 食物库或可映射配方；AI 估算项按估算有效 | hard |
+| `R04_NUTRIENT_RANGE` | 营养合理性 | 两者 | 记录侧提示仍允许提交；配餐侧重试优先 | **soft** |
+| `R05_STRUCTURE` | 膳食结构 | 两者 | 记录侧提示；配餐侧结构优先重试 | **soft** |
+| `R06_REPLACE_REQUEST` | 换菜约束 | 配餐(换菜) | 逐条确定性校验，不满足不能出现 | hard |
+| `R07_DUPLICATE` | 重复菜品 | 两者 | 提示/合并 | **soft** |
+| `R08_SCOPE` | 餐次/医疗边界 | 两者 | `meal_type` 非法 422；不做疾病判断 | hard |
+| `R09_AI_UNCONFIRMED` | 未确认 AI 估算项 | 记录提交 | `ai_estimated` 未 `confirmed` 则 422 阻断，绝不进日统计 | hard |
 
 **营养合理性：动态范围，而非“每餐达到每日目标”**
 
@@ -466,9 +459,9 @@ interface ValidationResult {
 
 **与 AI 的交互**
 
-* `hard` 失败：不返回给用户，直接把 `failed_rules`（含 `rule_id`、`offending_items`、`expected/actual`）作为重生成输入，最多 2 次。
-* `soft` 失败：可返回用户并展示为警告，由用户确认。
-* 2 次仍失败：规则引擎从食物库组合兜底，标记 `fallback = true`。
+* `hard` 失败：记录提交直接 `422 VALIDATION_FAILED`（`details` 含 `failed_rules`）；配餐侧作为重生成输入，最多 2 次。
+* `soft` 失败：返回用户展示为警告（记录仍可提交；配餐继续重试）。
+* 配餐 2 次仍失败：规则引擎按本餐目标与结构区间从食物库组合兜底，标记 `fallback = true`、`source = RULE_FALLBACK`。
 * `validation_result` 与 `context_snapshot` 一起落库，供解释与审计。
 
 **医疗边界**：产品只提供膳食记录、营养信息与一般性膳食建议，不判断用户是否患有某种疾病，也不根据少量记录给出疾病结论；涉及疾病或治疗问题时，提示咨询医生或注册营养师。
@@ -484,7 +477,9 @@ erDiagram
   profiles ||--|| user_settings : has
   profiles ||--o{ plan_sessions : owns
   plan_sessions ||--o{ plan_items : contains
+  plan_sessions ||--o{ plan_revisions : versions
   profiles ||--o{ meal_groups : owns
+  meal_groups ||--o{ meal_draft_items : drafts
   meal_groups ||--o{ meal_entries : has
   meal_entries ||--o{ meal_entry_items : contains
   profiles ||--o{ daily_stats : aggregates
@@ -508,12 +503,14 @@ erDiagram
 | `recipes` | id, name, servings, yield_g, oil_g, cooking_method, source, status | 复合菜品（正式） |
 | `recipe_ingredients` | recipe_id, food_id, amount_g | 配方原料 |
 | `recipe_candidates` | id, user_id, dish_name, proposed_recipe json 文本, confidence, source, status, reviewed_by | AI 推断配方，待审核 |
-| `plan_sessions` | id, user_id, meal_date, meal_type, status, context_snapshot json 文本, validation_result json 文本, created_at | 规划会话与可解释依据 |
-| `plan_items` | id, session_id, food_id, name, amount_g, value_type, nutrition json 文本, reason, citations json 文本, rejected | 候选餐单，不计入摄入 |
-| `meal_groups` | id, user_id, meal_date, meal_type, instance_seq, status | 餐次组（加餐可多实例） |
+| `plan_sessions` | id, user_id, meal_date, meal_type, status(planning/accepting/logged/failed/closed), current_revision, accepted_group_id, context_snapshot json 文本, validation_result json 文本 | 规划会话与可解释依据；`closed` 仅结束规划 |
+| `plan_items` | id, session_id, food_id, name, amount_g, value_type, nutrition json 文本, reason, citations json 文本, rejected | 当前方案条目，不计入摄入 |
+| `plan_revisions` | id, session_id, revision, base_revision, source(AI/RULE_FALLBACK), items json 文本, replace_constraints json 文本, user_feedback, validation_result json 文本 | 换菜版本化修订历史，可对比/回滚 |
+| `meal_groups` | id, user_id, meal_date, meal_type, instance_seq, status(draft/logged/abandoned), draft_revision, expires_at, committed_at | 餐次组；draft 带过期时间与乐观锁 |
+| `meal_draft_items` | id, group_id, user_id, food_id, raw_name, amount_g, value_type, analysis json 文本, ai_source, confirmation_status(pending/confirmed/rejected), confirmed_by, confirmed_at | item 级餐次草稿，**AI 确认态唯一载体**；commit 原地转 `meal_entry_items` |
 | `meal_entries` | id, group_id, user_id, mode, revision, base_revision, supersedes_entry_id, is_current, totals json 文本, value_type, nutrition_data_version, idempotency_key | 餐次记录版本 |
-| `meal_entry_items` | id, entry_id, food_id, raw_name, amount_g, value_type, nutrients json 文本, analysis json 文本 | 餐次明细 |
-| `daily_stats` | user_id, stat_date, metrics json 文本, structure json 文本, source_hash, computed_at | 当日统计 |
+| `meal_entry_items` | id, entry_id, food_id, raw_name, amount_g, value_type, nutrients json 文本, analysis json 文本, ai_source, confirmation_status, confirmed_by, confirmed_at | 餐次明细（确认态随迁） |
+| `daily_stats` | user_id, stat_date, metrics json 文本, structure json 文本（物化，禁止 `'{}'` 硬编码）, aggregator_version, value_type, source_hash, computed_at | 当日统计（`DailyStatsAggregator` 唯一写入口） |
 | `period_reports` | id, user_id, period_type, period_start, period_end, stats json 文本, ai_summary, status, input_hash | 周/月报 |
 | `inferred_trends` | id, user_id, metric, conclusion, status, evidence json 文本, window_start, window_end, sample_meals | 推断趋势 |
 | `validation_rules` | rule_id, severity, threshold json 文本, weight json 文本, version, enabled | 校验规则与阈值（版本化） |
@@ -576,42 +573,43 @@ erDiagram
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/plan-sessions` | 创建规划会话，返回候选餐单、依据与校验结果 |
-| POST | `/plan-sessions/{id}/messages` | 换菜、追问；内部完成校验与重生成 |
-| POST | `/plan-sessions/{id}/complete` | 结束规划，进入“规划完成待记录” |
-| GET | `/plan-sessions/{id}` | 恢复会话（含消息、候选餐单、校验结果） |
-| GET | `/meal-groups?date=` | 列出当日餐次组、当前版本与有效集合 |
-| POST | `/meal-groups` | 创建餐次组（多次加餐时新建实例） |
-| POST | `/meal-groups/{id}/entries` | 提交 `append` / `replace` 记录（幂等 + 版本校验） |
-| GET | `/meal-groups/{id}` | 查看版本链与当前有效清单 |
-| GET | `/reports/{periodType}?start=` | 周期报告（按需生成 + 缓存） |
-| GET/PUT | `/settings` | 更新目标、偏好、忌口、过敏原 |
-| POST | `/foods-parse` | 文本或照片 → AI 菜品分析（配方、区间、置信度） |
+| POST | `/plan-sessions` | 创建规划会话（本餐目标 = 全天目标 × 餐次权重；gap 仅提示） |
+| POST | `/plan-sessions/{id}/messages` | 版本化换菜（同会话新 revision，携带 `user_feedback`/`constraints`） |
+| POST | `/plan-sessions/{id}/accept` | **原子接受**：`commit=true` 直接记录 / `commit=false` 生成可编辑草稿；单事务+幂等+状态机 |
+| POST | `/plan-sessions/{id}/complete` | 仅结束规划（`closed`），不参与记录 |
+| GET | `/plan-sessions/{id}` | 恢复会话（含 `current_revision`、`accepted_group_id`、方案条目） |
+| GET | `/meal-groups?date=` | 当日餐次（含草稿项与物化 structure） |
+| POST | `/meal-groups/drafts` | 开餐：惰性建/复用草稿组，已记录组重开为草稿修正 |
+| POST | `/meal-groups/{id}/draft/items` | 加草稿项（AI 候选需 `confirmed` 标记） |
+| PATCH | `/meal-groups/{id}/draft/items/{itemId}` | 改量/换食物/确认 AI 项（幂等） |
+| DELETE | `/meal-groups/{id}/draft/items/{itemId}` | 删草稿项（乐观锁） |
+| POST | `/meal-groups/{id}/draft/copy-previous` | 复制上一餐 |
+| POST | `/meal-groups/{id}/draft/commit` | 提交：规则硬拦 → 转 entry → 聚合 → stale；幂等键必填 |
+| GET | `/meal-groups/{id}` | 组详情（版本链 + 草稿项） |
+| GET | `/reports/{periodType}?start=` | 周期报告（食物组/指南指标为主 + 营养辅指标，按需生成 + 四版本 inputHash 缓存） |
+| GET/PATCH | `/settings` | 设置字段级更新；过敏原变更需 `confirm_allergen_change=true` |
+| POST | `/foods-parse` | AI 识别 → 返回候选项（全部待确认，不直接入草稿） |
+| GET | `/foods?q=` | 食物库检索 |
 
-**请求示例：补录一杯饮料（append）**
+**请求示例：草稿 item 级编辑与提交**
 
 ```json
-{
-  "mode": "append",
-  "idempotency_key": "b0c1f1c4-6c2a-4f0e-9f1e-2b7a9d3c8e11",
-  "items": [
-    { "raw_name": "无糖可乐", "food_id": "f_cola_002", "amount_g": 330 }
-  ]
-}
+// POST /meal-groups/{id}/draft/items
+{ "foodId": "f_egg_001", "rawName": "鸡蛋", "amountG": 100, "draft_revision": 1 }
+
+// 只改鸡蛋这一项（PATCH /meal-groups/{id}/draft/items/{itemId}）
+{ "amountG": 50, "draft_revision": 2 }
+
+// POST /meal-groups/{id}/draft/commit
+{ "draft_revision": 2, "idempotency_key": "b0c1f1c4-6c2a-4f0e-9f1e-2b7a9d3c8e11" }
 ```
 
-**请求示例：修正整餐（replace，需携带基线版本）**
+**请求示例：原子接受配餐**
 
 ```json
-{
-  "mode": "replace",
-  "base_revision": 3,
-  "idempotency_key": "5d0e2a77-1a4b-42c9-9a5e-1f0f0c7b2d33",
-  "items": [
-    { "raw_name": "米饭", "food_id": "f_rice_001", "amount_g": 150 },
-    { "raw_name": "糖醋排骨", "recipe_id": "r_sparerib_001", "amount_g": 120 }
-  ]
-}
+// POST /plan-sessions/{id}/accept
+{ "commit": true, "idempotency_key": "5d0e2a77-1a4b-42c9-9a5e-1f0f0c7b2d33" }
+// 重复调用返回同一结果；状态 PLANNING → ACCEPTING → LOGGED；失败回滚无半成品
 ```
 
 **响应示例**
@@ -895,7 +893,7 @@ backend/
     ai/                    # 智谱调用、重试、日志、Prompt 模板
     context/               # 必要上下文组装
     dish/                  # AI 菜品分析：配方推断、区间估算、置信度
-    nutrition/             # 营养引擎、目标、结构评估、R01–R08 校验
+    nutrition/             # 营养引擎、目标、结构评估、共享 RuleEngine（R01–R09）
     domain/                # 领域模型与餐次版本链
     service/               # 规划、餐次组、报告、画像
     adapter/               # JDBC 仓储（H2，JSON 文本 + 关键词检索）

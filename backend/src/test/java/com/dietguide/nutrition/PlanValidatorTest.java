@@ -54,8 +54,10 @@ class PlanValidatorTest {
                 ""
         );
 
-        assertTrue(result.failedRules().stream()
-                .anyMatch(rule -> "R05_STRUCTURE".equals(rule.ruleId()) && "hard".equals(rule.severity())));
+        // 规则表（2026-10-30）：R05 结构为软规则 —— 只提示不阻断，passed 仍为 true
+        assertTrue(result.passed());
+        assertTrue(result.warnings().stream()
+                .anyMatch(warning -> "R05_STRUCTURE".equals(warning.ruleId())));
     }
 
     @Test
